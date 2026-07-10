@@ -9,6 +9,7 @@ interface SettingsProps {
 
 export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
   const [syncUrl, setSyncUrl] = useState('');
+  const [useProxy, setUseProxy] = useState(false);
   const [status, setStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
   const [stats, setStats] = useState({
@@ -21,6 +22,7 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
   useEffect(() => {
     const savedUrl = localStorage.getItem('bookorbit_sync_url') || '';
     setSyncUrl(savedUrl);
+    setUseProxy(localStorage.getItem('bookorbit_use_proxy') === 'true');
     if (savedUrl) {
       setStatus('success');
     }
@@ -49,12 +51,16 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
     if (!syncUrl.trim()) {
       setStatus('idle');
       localStorage.removeItem('bookorbit_sync_url');
+      localStorage.removeItem('bookorbit_use_proxy');
       onConfigSaved();
       return;
     }
 
     setStatus('testing');
     setErrorMessage('');
+
+    // Sauvegarder d'abord la préférence temporairement car koboSyncApi.initialize va la lire
+    localStorage.setItem('bookorbit_use_proxy', useProxy ? 'true' : 'false');
 
     try {
       // Tester l'initialisation de l'API
@@ -111,6 +117,20 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
             />
             <span className="input-help">
               Vous trouverez cette URL dans BookOrbit, sous <strong>Paramètres &gt; Kobo &gt; Ajouter un périphérique</strong>.
+            </span>
+          </div>
+
+          <div className="input-group checkbox-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={useProxy}
+                onChange={(e) => setUseProxy(e.target.checked)}
+              />
+              <span>Utiliser le proxy Vercel (contournement CORS)</span>
+            </label>
+            <span className="input-help">
+              Cochez cette case si votre navigateur bloque les requêtes directes (erreur CORS).
             </span>
           </div>
 

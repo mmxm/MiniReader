@@ -72,6 +72,14 @@ export function parseSyncUrl(url: string): BookOrbitConfig {
   };
 }
 
+export function getRequestUrl(url: string): string {
+  const useProxy = localStorage.getItem('bookorbit_use_proxy') === 'true';
+  if (useProxy) {
+    return `/api/proxy?url=${encodeURIComponent(url)}`;
+  }
+  return url;
+}
+
 /**
  * Service pour interagir directement avec l'API Kobo Sync de BookOrbit.
  */
@@ -81,7 +89,8 @@ export const koboSyncApi = {
    */
   async initialize(syncUrl: string): Promise<any> {
     const config = parseSyncUrl(syncUrl);
-    const response = await fetch(`${config.baseUrl}/v1/initialization`, {
+    const targetUrl = getRequestUrl(`${config.baseUrl}/v1/initialization`);
+    const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -111,7 +120,8 @@ export const koboSyncApi = {
       headers['x-kobo-synctoken'] = syncToken;
     }
 
-    const response = await fetch(`${config.baseUrl}/v1/library/sync`, {
+    const targetUrl = getRequestUrl(`${config.baseUrl}/v1/library/sync`);
+    const response = await fetch(targetUrl, {
       method: 'GET',
       headers
     });
@@ -139,7 +149,8 @@ export const koboSyncApi = {
    */
   async downloadBook(syncUrl: string, entitlementId: string): Promise<Blob> {
     const config = parseSyncUrl(syncUrl);
-    const response = await fetch(`${config.baseUrl}/v1/books/${entitlementId}/download`, {
+    const targetUrl = getRequestUrl(`${config.baseUrl}/v1/books/${entitlementId}/download`);
+    const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
         'User-Agent': 'Kobo eReader'
@@ -158,7 +169,8 @@ export const koboSyncApi = {
    */
   async fetchReadingState(syncUrl: string, entitlementId: string): Promise<any> {
     const config = parseSyncUrl(syncUrl);
-    const response = await fetch(`${config.baseUrl}/v1/library/${entitlementId}/state`, {
+    const targetUrl = getRequestUrl(`${config.baseUrl}/v1/library/${entitlementId}/state`);
+    const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -183,7 +195,8 @@ export const koboSyncApi = {
     payload: any
   ): Promise<any> {
     const config = parseSyncUrl(syncUrl);
-    const response = await fetch(`${config.baseUrl}/v1/library/${entitlementId}/state`, {
+    const targetUrl = getRequestUrl(`${config.baseUrl}/v1/library/${entitlementId}/state`);
+    const response = await fetch(targetUrl, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
