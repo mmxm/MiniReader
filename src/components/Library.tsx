@@ -122,8 +122,9 @@ export const Library: React.FC<LibraryProps> = ({
             const fileSizeBytes = null;
             const fileHash = null;
 
-            // Construire l'URL de couverture à partir du template Kobo de Bookorbit
-            const coverUrl = `${config.baseUrl}/v1/books/${bookId}/thumbnail/300/400/false/image.jpg`;
+            // Construire l'URL de couverture à partir du template Kobo de Bookorbit (en utilisant CoverImageId du serveur)
+            const coverImageId = metadata.CoverImageId || bookId;
+            const coverUrl = `${config.baseUrl}/v1/books/${coverImageId}/thumbnail/300/400/false/image.jpg`;
 
             // Récupérer le livre existant pour préserver le statut téléchargé localement
             const existingBook = await db.books.get(bookId);

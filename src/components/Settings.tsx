@@ -3,6 +3,9 @@ import { koboSyncApi } from '../services/koboSyncApi';
 import { db } from '../db/libraryDb';
 import { ShieldCheck, CloudLightning, HardDrive, RefreshCw } from 'lucide-react';
 
+declare const __APP_VERSION__: string;
+declare const __COMMIT_HASH__: string;
+
 interface SettingsProps {
   onConfigSaved: () => void;
 }
@@ -195,6 +198,10 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
             Vider le cache hors ligne
           </button>
         </div>
+      </div>
+
+      <div className="version-info">
+        MiniReader v{__APP_VERSION__} (commit {__COMMIT_HASH__})
       </div>
     </div>
   );

@@ -1077,3 +1077,12 @@ body {
   cursor: pointer;
 }
 
+.version-info {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 24px;
+  margin-bottom: 8px;
+  opacity: 0.6;
+}
+
