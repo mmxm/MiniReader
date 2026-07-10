@@ -11,6 +11,12 @@ export default function App() {
   const [activeView, setActiveView] = useState<'library' | 'settings'>('library');
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
   const [syncTrigger, setSyncTrigger] = useState(0);
+  const [appTheme, setAppTheme] = useState(() => localStorage.getItem('app_theme') || 'dark');
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('light-theme', appTheme === 'light');
+    localStorage.setItem('app_theme', appTheme);
+  }, [appTheme]);
 
   // État de gestion des conflits
   const [conflict, setConflict] = useState<{
@@ -107,7 +113,11 @@ export default function App() {
           />
         )}
         {activeView === 'settings' && (
-          <Settings onConfigSaved={handleConfigSaved} />
+          <Settings 
+            onConfigSaved={handleConfigSaved} 
+            appTheme={appTheme}
+            onThemeChange={setAppTheme}
+          />
         )}
       </main>
 

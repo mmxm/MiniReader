@@ -8,9 +8,11 @@ declare const __COMMIT_HASH__: string;
 
 interface SettingsProps {
   onConfigSaved: () => void;
+  appTheme: string;
+  onThemeChange: (theme: string) => void;
 }
 
-export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
+export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onThemeChange }) => {
   const [syncUrl, setSyncUrl] = useState('');
   const [useProxy, setUseProxy] = useState(false);
   const [status, setStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -97,6 +99,15 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
     }
   };
 
+  const handleForceFullSync = () => {
+    if (window.confirm('Voulez-vous réinitialiser le jeton de synchronisation locale ? La prochaine synchronisation retéléchargera tout le catalogue à partir de zéro.')) {
+      localStorage.removeItem('bookorbit_sync_token');
+      localStorage.removeItem('bookorbit_last_sync_date');
+      alert('Jeton réinitialisé. La prochaine synchronisation sera complète.');
+      loadStorageStats();
+    }
+  };
+
   return (
     <div className="settings-container">
       <div className="card glass">
@@ -135,6 +146,26 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
             <span className="input-help">
               Cochez cette case si votre navigateur bloque les requêtes directes (erreur CORS).
             </span>
+          </div>
+
+          <div className="input-group">
+            <label>Thème de l'application</label>
+            <div className="theme-buttons">
+              <button
+                type="button"
+                className={`theme-btn ${appTheme === 'dark' ? 'active' : ''}`}
+                onClick={() => onThemeChange('dark')}
+              >
+                Sombre
+              </button>
+              <button
+                type="button"
+                className={`theme-btn ${appTheme === 'light' ? 'active' : ''}`}
+                onClick={() => onThemeChange('light')}
+              >
+                Clair
+              </button>
+            </div>
           </div>
 
           <div className="status-indicator-wrapper">
@@ -196,6 +227,14 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved }) => {
             disabled={stats.downloadedCount === 0}
           >
             Vider le cache hors ligne
+          </button>
+          <button 
+            type="button" 
+            className="btn btn-secondary" 
+            onClick={handleForceFullSync}
+            style={{ marginLeft: '12px' }}
+          >
+            Forcer une synchronisation complète
           </button>
         </div>
       </div>

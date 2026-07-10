@@ -23,6 +23,19 @@
   --radius-lg: 24px;
 }
 
+:root.light-theme {
+  --bg-primary: #f5f6f8;
+  --bg-secondary: #ffffff;
+  --text-primary: #121620;
+  --text-secondary: #4b5563;
+  --text-muted: #8c96a5;
+  --border-color: rgba(0, 0, 0, 0.08);
+  --glass-bg: rgba(255, 255, 255, 0.75);
+  --glass-border: rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.06);
+}
+
 /* Reset de base */
 * {
   box-sizing: border-box;
@@ -1084,5 +1097,202 @@ body {
   margin-top: 24px;
   margin-bottom: 8px;
   opacity: 0.6;
+}
+
+/* Surcharges spécifiques thème clair pour l'application */
+:root.light-theme .glass-input {
+  background: rgba(0, 0, 0, 0.02);
+}
+:root.light-theme .glass-input:focus {
+  background: rgba(0, 0, 0, 0.04);
+}
+:root.light-theme .nav-item {
+  color: var(--text-secondary);
+}
+:root.light-theme .nav-item.active {
+  color: var(--accent);
+}
+:root.light-theme .btn-danger {
+  background: #ff3b30;
+  color: #fff;
+}
+:root.light-theme .book-card {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+/* Contrôles typographiques ajustables */
+.adjust-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  max-width: 140px;
+  justify-content: space-between;
+}
+
+:root.light-theme .adjust-control {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.btn-adjust {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 600;
+  transition: background 0.2s ease;
+}
+
+.btn-adjust:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+:root.light-theme .btn-adjust:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.adjust-val {
+  font-size: 14px;
+  font-weight: 500;
+  min-width: 45px;
+  text-align: center;
+}
+
+.column-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.column-btn {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s ease;
+}
+
+.column-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+:root.light-theme .column-btn {
+  background: rgba(0, 0, 0, 0.02);
+}
+:root.light-theme .column-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.column-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+/* Sidebar Table des matières */
+.reader-sidebar {
+  position: fixed;
+  top: 0;
+  left: -320px;
+  width: 320px;
+  height: 100vh;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  background: var(--glass-bg);
+  border-right: 1px solid var(--border-color);
+}
+
+:root.light-theme .reader-sidebar {
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.08);
+}
+
+.reader-sidebar.open {
+  transform: translateX(320px);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sidebar-header h3 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.btn-close-sidebar {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toc-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.toc-item-wrapper {
+  margin-bottom: 8px;
+}
+
+.toc-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toc-link:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--accent) !important;
+}
+:root.light-theme .toc-link:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.toc-sublist {
+  margin-left: 16px;
+  border-left: 1px dashed var(--border-color);
+  padding-left: 8px;
+  margin-top: 4px;
+}
+
+.toc-empty {
+  color: var(--text-muted);
+  font-size: 14px;
+  text-align: center;
+  margin-top: 40px;
 }
 

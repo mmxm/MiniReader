@@ -153,7 +153,7 @@ export const Library: React.FC<LibraryProps> = ({
             }
 
             const title = metadata.Title || 'Sans titre';
-            const authors = Array.isArray(metadata.Authors) ? metadata.Authors.map((a: any) => a.Name) : ['Auteur inconnu'];
+            const authors = Array.isArray(metadata.Contributors) ? metadata.Contributors : (Array.isArray(metadata.Authors) ? metadata.Authors.map((a: any) => a.Name) : ['Auteur inconnu']);
             const description = metadata.Description || null;
             const publisher = metadata.Publisher?.Name || null;
             const publishedDate = metadata.PublicationDate || null;
@@ -355,6 +355,11 @@ export const Library: React.FC<LibraryProps> = ({
     if (!matchesSearch) return false;
 
     if (selectedTab === 'all') return true;
+    if (selectedTab === 'active') {
+      const state = readingStates[book.id];
+      const progress = state ? state.progressPercent : 0;
+      return progress > 0 && progress < 98;
+    }
     if (selectedTab === 'downloaded') return book.downloaded;
     return book.collections?.includes(selectedTab);
   });
@@ -407,6 +412,16 @@ export const Library: React.FC<LibraryProps> = ({
             onClick={() => setSelectedTab('all')}
           >
             Tous ({books.length})
+          </button>
+          <button 
+            className={`tab-btn glass ${selectedTab === 'active' ? 'active' : ''}`}
+            onClick={() => setSelectedTab('active')}
+          >
+            En cours ({books.filter(b => {
+              const state = readingStates[b.id];
+              const progress = state ? state.progressPercent : 0;
+              return progress > 0 && progress < 98;
+            }).length})
           </button>
           <button 
             className={`tab-btn glass ${selectedTab === 'downloaded' ? 'active' : ''}`}

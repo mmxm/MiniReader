@@ -3,7 +3,7 @@ import ePub, { Book as EpubBook, Rendition } from 'epubjs';
 import { db } from '../db/libraryDb';
 import { syncQueueService } from '../services/syncQueue';
 import { dictionaryService } from '../services/dictionary';
-import { X, ArrowLeft, ArrowRight, Type, BookOpen, RefreshCw } from 'lucide-react';
+import { X, ArrowLeft, ArrowRight, Type, BookOpen, RefreshCw, Menu } from 'lucide-react';
 
 interface ReaderProps {
   bookId: string;
@@ -21,10 +21,32 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   const [progress, setProgress] = useState(0);
 
   // Préférences de lecture
-  const [fontSize, setFontSize] = useState(() => localStorage.getItem('reader_font_size') || '100%');
+  const [fontSize, setFontSize] = useState<number>(() => {
+    const saved = localStorage.getItem('reader_font_size');
+    if (saved && saved.endsWith('%')) {
+      return Number(saved.replace('%', ''));
+    }
+    return Number(saved) || 100;
+  });
   const [fontFamily, setFontFamily] = useState(() => localStorage.getItem('reader_font_family') || 'system-ui');
   const [theme, setTheme] = useState(() => localStorage.getItem('reader_theme') || 'sepia'); // sepia, dark, light, night
+  const [lineHeight, setLineHeight] = useState<number>(() => {
+    const saved = localStorage.getItem('reader_line_height');
+    return Number(saved) || 1.5;
+  });
+  const [margin, setMargin] = useState<number>(() => {
+    const saved = localStorage.getItem('reader_margin');
+    return Number(saved) || 20;
+  });
+  const [columns, setColumns] = useState<'1' | '2' | 'auto'>(() => {
+    return (localStorage.getItem('reader_columns') as any) || '1';
+  });
+
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+
+  // Table des matières
+  const [toc, setToc] = useState<any[]>([]);
+  const [showToc, setShowToc] = useState(false);
 
   // État du dictionnaire
   const [selectedWord, setSelectedWord] = useState('');
@@ -48,6 +70,13 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   useEffect(() => {
     loadAndRenderBook();
 
+    // Raccourcis clavier au niveau parent (fenêtre principale)
+    const handleParentKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight') handleNextPage();
+      if (e.key === 'ArrowLeft') handlePrevPage();
+    };
+    window.addEventListener('keydown', handleParentKeydown);
+
     // Configuration des écouteurs pour la mise en veille et le flou (changement d'application)
     const handleVisibilityOrBlur = () => {
       saveProgressState(true); // true = force sync si en ligne
@@ -59,6 +88,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     return () => {
       // Nettoyage et sauvegarde finale lors du démontage du composant (fermeture)
       saveProgressState(false);
+      window.removeEventListener('keydown', handleParentKeydown);
       window.removeEventListener('visibilitychange', handleVisibilityOrBlur);
       window.removeEventListener('blur', handleVisibilityOrBlur);
       if (epubBookRef.current) {
@@ -70,7 +100,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   // Appliquer les préférences de style lorsque le thème, la police ou la taille changent
   useEffect(() => {
     applyStylesToRendition();
-  }, [theme, fontSize, fontFamily, isLoading]);
+  }, [theme, fontSize, fontFamily, lineHeight, margin, isLoading]);
 
   const loadAndRenderBook = async () => {
     try {
@@ -97,6 +127,11 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         updatePercentage();
       });
 
+      // Charger la table des matières
+      book.loaded.navigation.then((nav) => {
+        setToc(nav.toc || []);
+      });
+
       if (!containerRef.current) return;
 
       const rendition = book.renderTo(containerRef.current, {
@@ -104,6 +139,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         height: '100%',
         flow: 'paginated', // paginé classique
         allowScriptedContent: false,
+        spread: columns === '1' ? 'none' : (columns === '2' ? 'always' : 'auto')
       });
       renditionRef.current = rendition;
 
@@ -122,70 +158,138 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
       await rendition.display(targetLocation);
 
-      // Écouter les changements de page
-      rendition.on('relocated', (location: any) => {
-        if (!renditionRef.current || !epubBookRef.current) return;
-        
-        // Calculer le pourcentage actuel
-        let pct = 0;
-        const startCfi = location.start.cfi;
-        
-        if (epubBookRef.current.locations && typeof epubBookRef.current.locations.percentageFromCfi === 'function') {
-          pct = epubBookRef.current.locations.percentageFromCfi(startCfi) * 100;
-        } else {
-          // Fallback par index de spine
-          const totalSpine = (epubBookRef.current.spine as any)?.spineItems?.length || (epubBookRef.current.spine as any)?.length || 1;
-          pct = (location.start.index / totalSpine) * 100;
-        }
-
-        // Limiter entre 0 et 100
-        pct = Math.max(0, Math.min(100, pct));
-        if (pct > 99.5) pct = 100; // Arrondi de fin
-
-        const spineHref = epubBookRef.current.spine?.get(location.start.index)?.href || '';
-
-        const progressLocation = {
-          Source: spineHref,
-          Type: 'EPUBcfi',
-          Value: startCfi
-        };
-
-        // Mettre à jour les refs et l'état réactif
-        currentProgressRef.current = {
-          percent: pct,
-          location: progressLocation,
-        };
-        setProgress(pct);
-
-        // Afficher le titre de la section actuelle si dispo
-        const navItem = epubBookRef.current.navigation?.get(spineHref);
-        setCurrentPage(navItem ? navItem.label : `Page ${location.start.displayed.page} sur ${location.start.displayed.total}`);
-      });
-
-      // Écouter la sélection de texte (pour le dictionnaire)
-      rendition.on('selected', (_cfiRange: string, contents: any) => {
-        const selectedText = contents.window.getSelection().toString();
-        if (selectedText && selectedText.trim().length > 1) {
-          handleWordSelection(selectedText);
-        }
-      });
-
+      // Attacher les écouteurs d'événements (tactile, clavier dans l'iframe, etc.)
+      attachEventsToRendition(rendition);
       setIsLoading(false);
     } catch (e: any) {
       console.error(e);
-      alert(`Erreur de rendu du livre : ${e.message}`);
-      onClose();
+      alert(e.message || 'Erreur lors de l\'ouverture du livre.');
+      setIsLoading(false);
     }
   };
 
+  const attachEventsToRendition = (rendition: Rendition) => {
+    // Écouter les changements de page
+    rendition.on('relocated', (location: any) => {
+      if (!renditionRef.current || !epubBookRef.current) return;
+      
+      let pct = 0;
+      const startCfi = location.start.cfi;
+      
+      if (epubBookRef.current.locations && typeof epubBookRef.current.locations.percentageFromCfi === 'function') {
+        pct = epubBookRef.current.locations.percentageFromCfi(startCfi) * 100;
+      } else {
+        const totalSpine = (epubBookRef.current.spine as any)?.spineItems?.length || (epubBookRef.current.spine as any)?.length || 1;
+        pct = (location.start.index / totalSpine) * 100;
+      }
+      
+      // Arrondir
+      pct = Math.round(pct);
+      
+      setProgress(pct);
+      currentProgressRef.current = {
+        percent: pct,
+        location: {
+          Source: 'BookOrbit',
+          Type: 'epubcfi',
+          Value: startCfi
+        }
+      };
+      
+      if (location.start && location.start.displayed) {
+        setCurrentPage(`Page ${location.start.displayed.page} sur ${location.start.displayed.total}`);
+      } else {
+        setCurrentPage('');
+      }
+    });
+
+    // Écouter la sélection de mots pour le dictionnaire
+    rendition.on('selected', (_cfiRange: string, contents: any) => {
+      const selection = contents.window.getSelection();
+      const text = selection.toString().trim();
+      if (text.length > 0) {
+        handleWordSelection(text);
+      }
+    });
+
+    // Enregistrer les écouteurs d'événements dans le document de l'iframe
+    rendition.hooks.content.register((contents: any) => {
+      const doc = contents.document;
+      
+      // Clavier (touches fléchées)
+      doc.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'ArrowRight') handleNextPage();
+        if (e.key === 'ArrowLeft') handlePrevPage();
+      });
+      
+      // Clics sur les 25% latéraux
+      doc.addEventListener('click', (e: MouseEvent) => {
+        const selection = doc.getSelection();
+        if (selection && selection.toString().trim().length > 0) return; // Ne pas tourner si sélection de mot
+        
+        const width = doc.documentElement.clientWidth;
+        const clickX = e.clientX;
+        
+        if (clickX < width * 0.25) {
+          handlePrevPage();
+        } else if (clickX > width * 0.75) {
+          handleNextPage();
+        }
+      });
+      
+      // Touch/Swipe
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let touchStartTime = 0;
+      
+      doc.addEventListener('touchstart', (e: TouchEvent) => {
+        touchStartX = e.changedTouches[0].screenX;
+        touchStartY = e.changedTouches[0].screenY;
+        touchStartTime = Date.now();
+      }, { passive: true });
+      
+      doc.addEventListener('touchend', (e: TouchEvent) => {
+        const touchEndX = e.changedTouches[0].screenX;
+        const touchEndY = e.changedTouches[0].screenY;
+        const touchEndTime = Date.now();
+        
+        const diffX = touchEndX - touchStartX;
+        const diffY = touchEndY - touchStartY;
+        const timeDiff = touchEndTime - touchStartTime;
+        
+        // Swipe horizontal (seuil : 50px de distance, < 300ms de temps, Y peu décalé)
+        if (Math.abs(diffX) > 50 && Math.abs(diffY) < 100 && timeDiff < 300) {
+          if (diffX < 0) {
+            handleNextPage(); // swipe gauche -> suivant
+          } else {
+            handlePrevPage(); // swipe droite -> précédent
+          }
+          return;
+        }
+        
+        // Tap (seuil : mouvement < 10px, temps < 200ms)
+        if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && timeDiff < 200) {
+          const width = doc.documentElement.clientWidth;
+          const clickX = e.changedTouches[0].clientX;
+          
+          if (clickX < width * 0.25) {
+            handlePrevPage();
+          } else if (clickX > width * 0.75) {
+            handleNextPage();
+          }
+        }
+      }, { passive: true });
+    });
+  };
+
   const updatePercentage = () => {
-    if (!renditionRef.current || !epubBookRef.current || !renditionRef.current.location) return;
-    const startCfi = renditionRef.current.location.start.cfi;
+    if (!renditionRef.current || !epubBookRef.current || !epubBookRef.current.locations) return;
     try {
-      const pct = epubBookRef.current.locations.percentageFromCfi(startCfi) * 100;
-      const nextPct = Math.max(0, Math.min(100, pct));
-      setProgress(nextPct);
-      currentProgressRef.current.percent = nextPct;
+      const cfi = renditionRef.current.location?.start?.cfi;
+      if (cfi) {
+        const pct = epubBookRef.current.locations.percentageFromCfi(cfi) * 100;
+        setProgress(pct);
+      }
     } catch (e) {
       console.warn('Erreur calcul pourcentage exact', e);
     }
@@ -203,9 +307,9 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         'background-color': `${activeTheme.bg} !important`,
         'color': `${activeTheme.text} !important`,
         'font-family': `${fontFamily} !important`,
-        'font-size': `${fontSize} !important`,
-        'line-height': '1.6 !important',
-        'padding': '0 20px !important',
+        'font-size': `${fontSize}% !important`,
+        'line-height': `${lineHeight} !important`,
+        'padding': `0 ${margin}px !important`,
         'text-align': 'justify !important',
       },
       p: {
@@ -218,7 +322,6 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       }
     });
 
-    // Forcer l'application du thème
     rendition.themes.select('default');
     
     // Mettre à jour la couleur d'arrière-plan du container parent pour éviter les flashs blancs
@@ -276,9 +379,51 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     localStorage.setItem('reader_theme', newTheme);
   };
 
-  const handleFontSizeChange = (size: string) => {
+  const handleFontSizeChange = (size: number) => {
     setFontSize(size);
-    localStorage.setItem('reader_font_size', size);
+    localStorage.setItem('reader_font_size', String(size));
+  };
+
+  const handleLineHeightChange = (lh: number) => {
+    setLineHeight(lh);
+    localStorage.setItem('reader_line_height', String(lh));
+  };
+
+  const handleMarginChange = (m: number) => {
+    setMargin(m);
+    localStorage.setItem('reader_margin', String(m));
+  };
+
+  const handleColumnsChange = async (val: '1' | '2' | 'auto') => {
+    setColumns(val);
+    localStorage.setItem('reader_columns', val);
+    
+    // Recréer la rendition à la position courante
+    if (renditionRef.current && epubBookRef.current) {
+      const currentLocation = renditionRef.current.location?.start?.cfi || undefined;
+      
+      renditionRef.current.destroy();
+      
+      if (containerRef.current) {
+        const rendition = epubBookRef.current.renderTo(containerRef.current, {
+          width: '100%',
+          height: '100%',
+          flow: 'paginated',
+          allowScriptedContent: false,
+          spread: val === '1' ? 'none' : (val === '2' ? 'always' : 'auto')
+        });
+        
+        renditionRef.current = rendition;
+        attachEventsToRendition(rendition);
+        
+        setTimeout(() => {
+          applyStylesToRendition();
+          if (currentLocation) {
+            rendition.display(currentLocation);
+          }
+        }, 50);
+      }
+    }
   };
 
   const handleFontFamilyChange = (font: string) => {
@@ -288,30 +433,116 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
   const activeThemeObj = themeStyles[theme as keyof typeof themeStyles] || themeStyles.sepia;
 
+  const renderTocItems = (items: any[]) => {
+    return items.map((item, idx) => (
+      <div key={item.id || idx} className="toc-item-wrapper">
+        <button 
+          onClick={() => {
+            if (renditionRef.current) {
+              renditionRef.current.display(item.href);
+              setShowToc(false);
+            }
+          }}
+          className="toc-link"
+        >
+          {item.label}
+        </button>
+        {item.subitems && item.subitems.length > 0 && (
+          <div className="toc-sublist">
+            {renderTocItems(item.subitems)}
+          </div>
+        )}
+      </div>
+    ));
+  };
+
   return (
     <div className="reader-wrapper" style={{ backgroundColor: activeThemeObj.bg, color: activeThemeObj.text }}>
       {/* Barre de navigation haute */}
       <header className="reader-header glass" style={{ borderBottomColor: `rgba(${theme === 'dark' || theme === 'night' ? '255,255,255' : '0,0,0'}, 0.08)` }}>
-        <button onClick={handleCloseReader} className="btn-back">
-          <ArrowLeft size={20} />
-          <span className="back-text">Bibliothèque</span>
-        </button>
+        <div className="header-left" style={{ display: 'flex', alignItems: 'center' }}>
+          <button onClick={handleCloseReader} className="btn-back">
+            <ArrowLeft size={20} />
+            <span className="back-text">Bibliothèque</span>
+          </button>
+          <button onClick={() => setShowToc(!showToc)} className="btn-toc" title="Table des matières" style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', marginLeft: '12px' }}>
+            <Menu size={20} />
+          </button>
+        </div>
         <span className="reader-book-title">{bookTitle}</span>
         <button onClick={() => setShowSettingsMenu(!showSettingsMenu)} className="btn-settings">
           <Type size={20} />
         </button>
       </header>
 
+      {/* Volet latéral de la Table des matières */}
+      <div className={`reader-sidebar glass ${showToc ? 'open' : ''}`}>
+        <div className="sidebar-header">
+          <h3>Table des matières</h3>
+          <button onClick={() => setShowToc(false)} className="btn-close-sidebar">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="toc-list">
+          {toc.length === 0 ? (
+            <p className="toc-empty">Aucune table des matières disponible.</p>
+          ) : (
+            renderTocItems(toc)
+          )}
+        </div>
+      </div>
+
       {/* Menu Options de police & thèmes */}
       {showSettingsMenu && (
         <div className="reader-settings-menu glass animate-fade-in">
           <div className="settings-section">
             <span className="settings-label">Taille du texte</span>
-            <div className="size-buttons">
-              <button onClick={() => handleFontSizeChange('85%')} className={fontSize === '85%' ? 'active' : ''}>A-</button>
-              <button onClick={() => handleFontSizeChange('100%')} className={fontSize === '100%' ? 'active' : ''}>100%</button>
-              <button onClick={() => handleFontSizeChange('120%')} className={fontSize === '120%' ? 'active' : ''}>A+</button>
-              <button onClick={() => handleFontSizeChange('140%')} className={fontSize === '140%' ? 'active' : ''}>A++</button>
+            <div className="adjust-control">
+              <button onClick={() => handleFontSizeChange(Math.max(50, fontSize - 5))} className="btn-adjust">-</button>
+              <span className="adjust-val">{fontSize}%</span>
+              <button onClick={() => handleFontSizeChange(Math.min(250, fontSize + 5))} className="btn-adjust">+</button>
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <span className="settings-label">Interligne</span>
+            <div className="adjust-control">
+              <button onClick={() => handleLineHeightChange(Math.max(1.0, parseFloat((lineHeight - 0.1).toFixed(1))))} className="btn-adjust">-</button>
+              <span className="adjust-val">{lineHeight}</span>
+              <button onClick={() => handleLineHeightChange(Math.min(2.5, parseFloat((lineHeight + 0.1).toFixed(1))))} className="btn-adjust">+</button>
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <span className="settings-label">Marges</span>
+            <div className="adjust-control">
+              <button onClick={() => handleMarginChange(Math.max(5, margin - 5))} className="btn-adjust">-</button>
+              <span className="adjust-val">{margin}px</span>
+              <button onClick={() => handleMarginChange(Math.min(80, margin + 5))} className="btn-adjust">+</button>
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <span className="settings-label">Colonnes</span>
+            <div className="column-buttons">
+              <button 
+                onClick={() => handleColumnsChange('1')} 
+                className={`column-btn ${columns === '1' ? 'active' : ''}`}
+              >
+                1 col
+              </button>
+              <button 
+                onClick={() => handleColumnsChange('2')} 
+                className={`column-btn ${columns === '2' ? 'active' : ''}`}
+              >
+                2 col
+              </button>
+              <button 
+                onClick={() => handleColumnsChange('auto')} 
+                className={`column-btn ${columns === 'auto' ? 'active' : ''}`}
+              >
+                Auto
+              </button>
             </div>
           </div>
 
@@ -390,7 +621,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
               <p className="loading-text"><RefreshCw size={14} className="spin inline-icon" /> Recherche de la définition...</p>
             ) : (
               <p className="definition-text">{definition || "Aucune définition trouvée."}</p>
-            )}
+            )
+            }
           </div>
         </div>
       )}
