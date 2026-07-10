@@ -193,8 +193,8 @@ export const Library: React.FC<LibraryProps> = ({
           };
           const authors = getAuthors(metadata);
 
-          // Log de diagnostic pour analyser la structure de métadonnées brutes
-          console.log(`[Sync] Livre: "${title}", Auteurs résolus:`, authors, 'Métadonnées brutes:', metadata);
+          // Log de diagnostic pour analyser la structure de métadonnées brutes (en warning pour contourner les filtres de console)
+          console.warn(`[Sync Diagnostic] Livre: "${title}", Auteurs résolus:`, authors, 'Métadonnées brutes:', metadata);
           const description = metadata.Description || null;
           const publisher = metadata.Publisher?.Name || null;
           const publishedDate = metadata.PublicationDate || null;
