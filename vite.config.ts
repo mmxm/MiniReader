@@ -14,7 +14,7 @@ export default defineConfig({
         // S'assurer que le service worker met en cache les couvertures de livres chargées en externe (CORS)
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/.*\/thumbnail\/.*$/,
+            urlPattern: /.*\/thumbnail\/.*/,
             handler: 'CacheFirst',
             options: {
               cacheName: 'bookorbit-covers',

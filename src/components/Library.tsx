@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db, type Book, type ReadingState } from '../db/libraryDb';
-import { koboSyncApi, parseSyncUrl } from '../services/koboSyncApi';
+import { koboSyncApi, parseSyncUrl, getRequestUrl } from '../services/koboSyncApi';
 import { syncQueueService } from '../services/syncQueue';
 import { Download, BookOpen, Trash2, RefreshCw, Search, Folder } from 'lucide-react';
 
@@ -407,7 +407,7 @@ export const Library: React.FC<LibraryProps> = ({
               <div key={book.id} className="book-card glass">
                 <div className="book-cover-wrapper">
                   <img 
-                    src={book.coverUrl} 
+                    src={getRequestUrl(book.coverUrl)} 
                     alt={`Couverture de ${book.title}`} 
                     className="book-cover"
                     onError={(e) => {
