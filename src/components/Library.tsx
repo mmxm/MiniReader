@@ -43,16 +43,19 @@ export const Library: React.FC<LibraryProps> = ({
     try {
       const allBooks = await db.books.toArray();
       setBooks(allBooks);
+      // Détecter et réparer automatiquement les métadonnées (auteurs et URL de couvertures) en arrière-plan
+      const booksToRepair = allBooks.filter(b => 
+        (b.authors.length === 0 || b.authors.includes('Auteur inconnu') || b.authors.includes('auteur inconnu')) ||
+        b.coverUrl.includes(`/books/${b.id}/`)
+      );
 
-      // Détecter et migrer automatiquement les anciennes URL de couverture
-      const oldBooks = allBooks.filter(b => b.coverUrl.includes(`/books/${b.id}/`));
-      if (oldBooks.length > 0) {
-        console.warn(`[Library] ${oldBooks.length} anciennes URL de couverture détectées. Lancement de la migration...`);
+      if (booksToRepair.length > 0) {
+        console.warn(`[Library] ${booksToRepair.length} livres à réparer/migrer détectés. Lancement du traitement en arrière-plan...`);
         const syncUrl = localStorage.getItem('bookorbit_sync_url');
-        if (syncUrl) {
+        if (syncUrl && navigator.onLine) {
           const config = parseSyncUrl(syncUrl);
           
-          for (const book of oldBooks) {
+          for (const book of booksToRepair) {
             try {
               const targetUrl = getRequestUrl(`${config.baseUrl}/v1/library/${book.id}/metadata`);
               const response = await fetch(targetUrl, {
@@ -65,24 +68,58 @@ export const Library: React.FC<LibraryProps> = ({
               
               if (response.ok) {
                 const data = await response.json();
-                const metadata = Array.isArray(data) && data.length > 0 ? data[0] : null;
-                if (metadata && metadata.CoverImageId) {
-                  const coverUrl = `${config.baseUrl}/v1/books/${metadata.CoverImageId}/thumbnail/300/400/false/image.jpg`;
-                  await db.books.update(book.id, { coverUrl });
-                  console.log(`[Library] URL de couverture migrée pour : ${book.title}`);
+                const rawMeta = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
+                
+                if (rawMeta) {
+                  // Extraction hyper-défensive des auteurs
+                  const getAuthors = (meta: any): string[] => {
+                    if (!meta) return ['Auteur inconnu'];
+                    const fields = ['Contributors', 'contributors', 'Authors', 'authors', 'Author', 'author'];
+                    for (const f of fields) {
+                      const val = meta[f];
+                      if (!val) continue;
+                      if (Array.isArray(val)) {
+                        const resolved = val.map((item: any) => {
+                          if (typeof item === 'string') return item.trim();
+                          if (item && typeof item === 'object') {
+                            return (item.Name || item.name || item.DisplayName || item.displayName || '').trim();
+                          }
+                          return '';
+                        }).filter(n => n.length > 0);
+                        if (resolved.length > 0) return resolved;
+                      }
+                      if (typeof val === 'string' && val.trim().length > 0) {
+                        return [val.trim()];
+                      }
+                    }
+                    return ['Auteur inconnu'];
+                  };
+                  
+                  const resolvedAuthors = getAuthors(rawMeta);
+                  
+                  // Résolution de la couverture
+                  const coverImageId = rawMeta.CoverImageId || book.id;
+                  const coverUrl = `${config.baseUrl}/v1/books/${coverImageId}/thumbnail/300/400/false/image.jpg`;
+
+                  // Mettre à jour en base locale IndexedDB
+                  await db.books.update(book.id, { 
+                    authors: resolvedAuthors, 
+                    coverUrl 
+                  });
+                  
+                  console.warn(`[Library] Métadonnées réparées pour : "${book.title}" (Auteurs: ${resolvedAuthors.join(', ')})`);
                 }
               }
             } catch (err) {
-              console.error(`[Library] Échec de la migration de couverture pour ${book.title}:`, err);
+              console.error(`[Library] Échec de la réparation pour ${book.title}:`, err);
             }
           }
           
-          // Recharger la bibliothèque après migration
+          // Recharger la bibliothèque après les réparations
           const updatedBooks = await db.books.toArray();
           setBooks(updatedBooks);
         }
       }
-
       // Extraire la liste unique des collections
       const colsSet = new Set<string>();
       allBooks.forEach(b => b.collections?.forEach(c => colsSet.add(c)));
