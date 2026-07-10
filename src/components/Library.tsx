@@ -526,7 +526,7 @@ export const Library: React.FC<LibraryProps> = ({
                         </button>
                         <button 
                           onClick={() => handleDeleteLocalBook(book.id)} 
-                          className="btn btn-icon btn-danger-icon"
+                          className="btn-icon btn-danger-icon"
                           title="Supprimer du stockage local"
                         >
                           <Trash2 size={16} />

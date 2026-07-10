@@ -3,6 +3,7 @@ import ePub, { Book as EpubBook, Rendition } from 'epubjs';
 import { db } from '../db/libraryDb';
 import { syncQueueService } from '../services/syncQueue';
 import { dictionaryService } from '../services/dictionary';
+import { koboSyncApi } from '../services/koboSyncApi';
 import { X, ArrowLeft, ArrowRight, Type, BookOpen, RefreshCw, Menu } from 'lucide-react';
 
 interface ReaderProps {
@@ -48,6 +49,16 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   const [toc, setToc] = useState<any[]>([]);
   const [showToc, setShowToc] = useState(false);
 
+  // Conflit de progression au démarrage
+  const [readerConflict, setReaderConflict] = useState<{
+    localPercent: number;
+    localDate: string;
+    remotePercent: number;
+    remoteDate: string;
+    remoteLocation: string;
+    remoteStatePayload: any;
+  } | null>(null);
+
   // État du dictionnaire
   const [selectedWord, setSelectedWord] = useState('');
   const [definition, setDefinition] = useState<string | null>(null);
@@ -59,6 +70,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     location: null as { Source: string; Type: string; Value: string } | null,
   });
 
+  const isSavedRef = useRef(false);
+
   // Définition des thèmes graphiques pour l'iframe epub.js
   const themeStyles = {
     light: { bg: '#ffffff', text: '#1a1a1a', label: 'Clair' },
@@ -69,6 +82,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
   useEffect(() => {
     loadAndRenderBook();
+
+    // Dummy listener pour iOS Safari afin de lui permettre de capturer les touches dans l'iframe
+    const dummyTouchStart = () => {};
+    document.body.addEventListener('touchstart', dummyTouchStart, { passive: true });
 
     // Raccourcis clavier au niveau parent (fenêtre principale)
     const handleParentKeydown = (e: KeyboardEvent) => {
@@ -87,7 +104,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     return () => {
       // Nettoyage et sauvegarde finale lors du démontage du composant (fermeture)
-      saveProgressState(false);
+      if (!isSavedRef.current) {
+        saveProgressState(false);
+      }
+      document.body.removeEventListener('touchstart', dummyTouchStart);
       window.removeEventListener('keydown', handleParentKeydown);
       window.removeEventListener('visibilitychange', handleVisibilityOrBlur);
       window.removeEventListener('blur', handleVisibilityOrBlur);
@@ -143,9 +163,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       });
       renditionRef.current = rendition;
 
-      // Charger le dernier état de lecture enregistré
+      // 1. Charger le dernier état de lecture enregistré localement
       const lastState = await db.readingStates.get(bookId);
       let targetLocation: string | undefined = undefined;
+      let startPercent = 0;
 
       if (lastState && lastState.location) {
         targetLocation = lastState.location.Value; // CFI
@@ -153,7 +174,73 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           percent: lastState.progressPercent,
           location: lastState.location,
         };
-        setProgress(lastState.progressPercent);
+        startPercent = lastState.progressPercent;
+      }
+      setProgress(startPercent);
+
+      // 2. Tenter de récupérer la progression distante au démarrage (si en ligne)
+      const syncUrl = localStorage.getItem('bookorbit_sync_url');
+      if (syncUrl && navigator.onLine) {
+        try {
+          const remoteState = await koboSyncApi.fetchReadingState(syncUrl, bookId);
+          if (remoteState && remoteState.CurrentBookmark) {
+            const remoteBookmark = remoteState.CurrentBookmark;
+            const remotePercent = remoteBookmark.ProgressPercent ?? 0;
+            const remoteLastModified = remoteBookmark.LastModified || new Date().toISOString();
+            const remoteLocation = remoteBookmark.Location;
+
+            if (remoteLocation && remoteLocation.Value) {
+              const hasLocalState = !!lastState;
+              const isLocalSynced = lastState ? lastState.synced : true;
+              
+              if (hasLocalState && !isLocalSynced && lastState.progressPercent !== remotePercent) {
+                // Détection de conflit ! On remplit l'état pour afficher la modale
+                setReaderConflict({
+                  localPercent: lastState.progressPercent,
+                  localDate: lastState.lastModified,
+                  remotePercent,
+                  remoteDate: remoteLastModified,
+                  remoteLocation: remoteLocation.Value,
+                  remoteStatePayload: remoteState
+                });
+              } else {
+                // Pas de conflit : si la progression distante est plus récente, ou si pas d'état local
+                const isRemoteNewer = !lastState || new Date(remoteLastModified) > new Date(lastState.lastModified);
+                if (isRemoteNewer) {
+                  targetLocation = remoteLocation.Value;
+                  startPercent = remotePercent;
+                  
+                  currentProgressRef.current = {
+                    percent: remotePercent,
+                    location: {
+                      Source: 'BookOrbit',
+                      Type: 'epubcfi',
+                      Value: remoteLocation.Value
+                    }
+                  };
+                  setProgress(remotePercent);
+
+                  // Mettre à jour IndexedDB localement
+                  await db.readingStates.put({
+                    bookId,
+                    lastModified: remoteLastModified,
+                    progressPercent: remotePercent,
+                    location: {
+                      Source: 'BookOrbit',
+                      Type: 'epubcfi',
+                      Value: remoteLocation.Value
+                    },
+                    statistics: remoteState.Statistics || null,
+                    statusInfo: remoteState.StatusInfo || null,
+                    synced: true
+                  });
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[Reader] Impossible de récupérer la progression distante au démarrage :', err);
+        }
       }
 
       await rendition.display(targetLocation);
@@ -215,6 +302,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     // Enregistrer les écouteurs d'événements dans le document de l'iframe
     rendition.hooks.content.register((contents: any) => {
       const doc = contents.document;
+      let lastTapTime = 0;
       
       // Clavier (touches fléchées)
       doc.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -227,7 +315,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const selection = doc.getSelection();
         if (selection && selection.toString().trim().length > 0) return; // Ne pas tourner si sélection de mot
         
-        const width = doc.documentElement.clientWidth;
+        // Bloquer l'événement s'il a déjà été traité par un événement tactile touchend
+        if (Date.now() - lastTapTime < 500) return;
+
+        const width = contents.window.innerWidth || doc.documentElement.clientWidth;
         const clickX = e.clientX;
         
         if (clickX < width * 0.25) {
@@ -243,14 +334,20 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       let touchStartTime = 0;
       
       doc.addEventListener('touchstart', (e: TouchEvent) => {
-        touchStartX = e.changedTouches[0].clientX;
-        touchStartY = e.changedTouches[0].clientY;
+        const touch = e.changedTouches?.[0] || e.touches?.[0];
+        if (!touch) return;
+
+        touchStartX = touch.clientX;
+        touchStartY = touch.clientY;
         touchStartTime = Date.now();
       }, { passive: true });
       
       doc.addEventListener('touchend', (e: TouchEvent) => {
-        const touchEndX = e.changedTouches[0].clientX;
-        const touchEndY = e.changedTouches[0].clientY;
+        const touch = e.changedTouches?.[0] || e.touches?.[0];
+        if (!touch) return;
+
+        const touchEndX = touch.clientX;
+        const touchEndY = touch.clientY;
         const touchEndTime = Date.now();
         
         const diffX = touchEndX - touchStartX;
@@ -269,8 +366,9 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         
         // Tap (seuil : mouvement < 10px, temps < 200ms)
         if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && timeDiff < 200) {
-          const width = doc.documentElement.clientWidth;
-          const clickX = e.changedTouches[0].clientX;
+          lastTapTime = Date.now();
+          const width = contents.window.innerWidth || doc.documentElement.clientWidth;
+          const clickX = touch.clientX;
           
           if (clickX < width * 0.25) {
             handlePrevPage();
@@ -349,20 +447,25 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     }
   };
 
-  const saveProgressState = (_triggerSync: boolean) => {
+  const saveProgressState = async (_triggerSync: boolean): Promise<void> => {
     const curr = currentProgressRef.current;
     if (curr.percent === 0 && curr.location === null) return;
 
-    // Lancer de façon asynchrone la mise à jour de progression dans le service
-    syncQueueService.addProgressUpdate(
-      bookId,
-      curr.percent,
-      curr.location
-    ).catch(e => console.error('[Reader] Erreur de sauvegarde de progression :', e));
+    try {
+      await syncQueueService.addProgressUpdate(
+        bookId,
+        curr.percent,
+        curr.location
+      );
+    } catch (e) {
+      console.error('[Reader] Erreur de sauvegarde de progression :', e);
+    }
   };
 
-  const handleCloseReader = () => {
-    saveProgressState(true);
+  const handleCloseReader = async () => {
+    setIsLoading(true);
+    await saveProgressState(true);
+    isSavedRef.current = true;
     onClose();
   };
 
@@ -432,6 +535,47 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   };
 
   const activeThemeObj = themeStyles[theme as keyof typeof themeStyles] || themeStyles.sepia;
+
+  const handleResolveReaderConflict = async (choice: 'local' | 'remote') => {
+    if (!readerConflict) return;
+    
+    const { remotePercent, remoteLocation, remoteDate, remoteStatePayload } = readerConflict;
+    
+    if (choice === 'remote') {
+      if (renditionRef.current) {
+        await renditionRef.current.display(remoteLocation);
+      }
+      setProgress(remotePercent);
+      currentProgressRef.current = {
+        percent: remotePercent,
+        location: {
+          Source: 'BookOrbit',
+          Type: 'epubcfi',
+          Value: remoteLocation
+        }
+      };
+      
+      const lastState = await db.readingStates.get(bookId);
+      await db.readingStates.put({
+        bookId,
+        lastModified: remoteDate,
+        progressPercent: remotePercent,
+        location: {
+          Source: 'BookOrbit',
+          Type: 'epubcfi',
+          Value: remoteLocation
+        },
+        statistics: remoteStatePayload.Statistics || (lastState ? lastState.statistics : null),
+        statusInfo: remoteStatePayload.StatusInfo || (lastState ? lastState.statusInfo : null),
+        synced: true
+      });
+    } else {
+      await db.readingStates.update(bookId, { synced: false });
+      saveProgressState(true);
+    }
+    
+    setReaderConflict(null);
+  };
 
   const renderTocItems = (items: any[]) => {
     return items.map((item, idx) => (
@@ -622,6 +766,58 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
               <p className="definition-text">{definition || "Aucune définition trouvée."}</p>
             )
             }
+          </div>
+        </div>
+      )}
+
+      {/* Pop-up de Conflit de progression interne */}
+      {readerConflict && (
+        <div className="modal-overlay">
+          <div className="modal-content glass animate-scale-in" style={{ maxWidth: '400px' }}>
+            <h3 className="modal-title" style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px' }}>Conflit de progression</h3>
+            <p className="modal-description" style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+              Une progression différente a été détectée sur le serveur BookOrbit pour ce livre.
+            </p>
+            <div className="conflict-options" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div 
+                className="conflict-option-card" 
+                onClick={() => handleResolveReaderConflict('local')}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '12px 16px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                  transition: 'background 0.2s ease'
+                }}
+              >
+                <span className="option-title" style={{ fontSize: '14px', fontWeight: 600 }}>Garder la position locale</span>
+                <span className="option-detail" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{readerConflict.localPercent}% lu</span>
+                <span className="option-date" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Enregistré le {new Date(readerConflict.localDate).toLocaleString('fr-FR')}</span>
+              </div>
+              <div 
+                className="conflict-option-card" 
+                onClick={() => handleResolveReaderConflict('remote')}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '12px 16px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                  transition: 'background 0.2s ease'
+                }}
+              >
+                <span className="option-title" style={{ fontSize: '14px', fontWeight: 600, color: 'var(--accent)' }}>Prendre la position serveur</span>
+                <span className="option-detail" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{readerConflict.remotePercent}% lu</span>
+                <span className="option-date" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Enregistré le {new Date(readerConflict.remoteDate).toLocaleString('fr-FR')}</span>
+              </div>
+            </div>
           </div>
         </div>
       )}
