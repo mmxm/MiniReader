@@ -42,6 +42,13 @@ export const Library: React.FC<LibraryProps> = ({
       const allBooks = await db.books.toArray();
       setBooks(allBooks);
 
+      // Détecter et corriger les anciennes URL de couverture (contenant l'ID du livre au lieu du CoverImageId)
+      const hasOldCoverUrls = allBooks.some(b => b.coverUrl.includes(`/books/${b.id}/`));
+      if (hasOldCoverUrls && allBooks.length > 0) {
+        console.warn('[Library] Anciennes URL de couverture détectées. Réinitialisation du jeton pour forcer un re-sync complet.');
+        localStorage.removeItem('bookorbit_sync_token');
+      }
+
       // Extraire la liste unique des collections
       const colsSet = new Set<string>();
       allBooks.forEach(b => b.collections?.forEach(c => colsSet.add(c)));
