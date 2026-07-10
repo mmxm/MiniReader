@@ -29,6 +29,8 @@ export const Library: React.FC<LibraryProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState('');
+  const [syncTotal, setSyncTotal] = useState(0);
+  const [syncProcessed, setSyncProcessed] = useState(0);
   const [downloadingBookId, setDownloadingBookId] = useState<string | null>(null);
   const [lastSyncDate, setLastSyncDate] = useState<string | null>(null);
 
@@ -119,180 +121,190 @@ export const Library: React.FC<LibraryProps> = ({
       // 3. Boucle de synchronisation incrémentale
       let hasMore = true;
       let syncToken = localStorage.getItem('bookorbit_sync_token') || undefined;
-      let pageCount = 1;
       const config = parseSyncUrl(syncUrl);
 
+      let allIncomingEntitlements: any[] = [];
+      let finalSyncToken = syncToken;
+
+      setSyncProgress('Récupération du catalogue...');
+      setSyncTotal(0);
+      setSyncProcessed(0);
+
       while (hasMore) {
-        setSyncProgress(`Récupération de la page ${pageCount}...`);
-        const result = await koboSyncApi.fetchLibraryDelta(syncUrl, syncToken);
-        
-        const entitlements = result.entitlements;
+        const result = await koboSyncApi.fetchLibraryDelta(syncUrl, finalSyncToken);
+        const entitlements = result.entitlements || [];
+        allIncomingEntitlements = allIncomingEntitlements.concat(entitlements);
         hasMore = result.hasMore;
         if (result.nextSyncToken) {
-          syncToken = result.nextSyncToken;
+          finalSyncToken = result.nextSyncToken;
         }
+      }
 
-        setSyncProgress(`Traitement de la page ${pageCount} (${entitlements.length} éléments)...`);
+      const total = allIncomingEntitlements.length;
+      setSyncTotal(total);
 
-        for (const item of entitlements) {
-          // A. Nouveau livre ou metadonnées changées
-          if (item.NewEntitlement || item.ChangedProductMetadata || item.ChangedEntitlement) {
-            const ent = item.NewEntitlement || item.ChangedProductMetadata || item.ChangedEntitlement;
-            const metadata = ent.BookMetadata;
-            const entitlement = ent.BookEntitlement;
-            const bookId = metadata?.EntitlementId || entitlement?.Id;
+      let processed = 0;
 
-            if (!bookId) continue;
+      for (const item of allIncomingEntitlements) {
+        processed++;
+        setSyncProcessed(processed);
+        setSyncProgress(`Mise à jour : ${processed} / ${total}`);
 
-            // Si le livre est marqué supprimé
-            if (entitlement?.IsRemoved || entitlement?.Status === 'Deleted') {
-              await db.books.delete(bookId);
-              await db.bookFiles.delete(bookId);
-              await db.readingStates.delete(bookId);
-              continue;
-            }
+        // A. Nouveau livre ou metadonnées changées
+        if (item.NewEntitlement || item.ChangedProductMetadata || item.ChangedEntitlement) {
+          const ent = item.NewEntitlement || item.ChangedProductMetadata || item.ChangedEntitlement;
+          const metadata = ent.BookMetadata;
+          const entitlement = ent.BookEntitlement;
+          const bookId = metadata?.EntitlementId || entitlement?.Id;
 
-            const title = metadata.Title || 'Sans titre';
-            const authors = Array.isArray(metadata.Contributors) ? metadata.Contributors : (Array.isArray(metadata.Authors) ? metadata.Authors.map((a: any) => a.Name) : ['Auteur inconnu']);
-            const description = metadata.Description || null;
-            const publisher = metadata.Publisher?.Name || null;
-            const publishedDate = metadata.PublicationDate || null;
-            const fileFormat = 'epub'; // Kobo utilise EPUB/KEPUB par défaut
-            const fileSizeBytes = null;
-            const fileHash = null;
+          if (!bookId) continue;
 
-            // Construire l'URL de couverture à partir du template Kobo de Bookorbit (en utilisant CoverImageId du serveur)
-            const coverImageId = metadata.CoverImageId || bookId;
-            const coverUrl = `${config.baseUrl}/v1/books/${coverImageId}/thumbnail/300/400/false/image.jpg`;
-
-            // Récupérer le livre existant pour préserver le statut téléchargé localement
-            const existingBook = await db.books.get(bookId);
-            const downloaded = existingBook ? existingBook.downloaded : false;
-            const collections = existingBook ? existingBook.collections || [] : [];
-
-            const book: Book = {
-              id: bookId,
-              title,
-              authors,
-              description,
-              publisher,
-              publishedDate,
-              fileFormat,
-              fileSizeBytes,
-              fileHash,
-              coverUrl,
-              downloaded,
-              addedAt: entitlement?.Created || new Date().toISOString(),
-              updatedAt: entitlement?.LastModified || new Date().toISOString(),
-              collections
-            };
-
-            await db.books.put(book);
-
-            // Gérer l'état de lecture fourni à la création
-            if (ent.ReadingState) {
-              const currentBookmark = ent.ReadingState.CurrentBookmark;
-              if (currentBookmark) {
-                const pct = currentBookmark.ProgressPercent ?? 0;
-                const lastMod = currentBookmark.LastModified || new Date().toISOString();
-                const location = currentBookmark.Location || null;
-
-                // Vérifier s'il y a un conflit avec un avancement local non synchronisé
-                const localState = await db.readingStates.get(bookId);
-                if (localState && !localState.synced && localState.progressPercent !== pct) {
-                  // Détection de conflit !
-                  onConflictDetected({
-                    bookId,
-                    bookTitle: title,
-                    localProgress: localState.progressPercent,
-                    localDate: localState.lastModified,
-                    remoteProgress: pct,
-                    remoteDate: lastMod
-                  });
-                } else {
-                  // Pas de conflit, on applique l'état serveur
-                  await db.readingStates.put({
-                    bookId,
-                    lastModified: lastMod,
-                    progressPercent: pct,
-                    location,
-                    statistics: ent.ReadingState.Statistics || null,
-                    statusInfo: ent.ReadingState.StatusInfo || null,
-                    synced: true
-                  });
-                }
-              }
-            }
+          // Si le livre est marqué supprimé
+          if (entitlement?.IsRemoved || entitlement?.Status === 'Deleted') {
+            await db.books.delete(bookId);
+            await db.bookFiles.delete(bookId);
+            await db.readingStates.delete(bookId);
+            continue;
           }
-          // B. Changement de l'état de lecture seul
-          else if (item.ChangedReadingState) {
-            const state = item.ChangedReadingState.ReadingState;
-            const bookId = state?.EntitlementId;
-            const currentBookmark = state?.CurrentBookmark;
 
-            if (bookId && currentBookmark) {
+          const title = metadata.Title || 'Sans titre';
+          const authors = Array.isArray(metadata.Contributors) ? metadata.Contributors : (Array.isArray(metadata.Authors) ? metadata.Authors.map((a: any) => a.Name) : ['Auteur inconnu']);
+          const description = metadata.Description || null;
+          const publisher = metadata.Publisher?.Name || null;
+          const publishedDate = metadata.PublicationDate || null;
+          const fileFormat = 'epub'; // Kobo utilise EPUB/KEPUB par défaut
+          const fileSizeBytes = null;
+          const fileHash = null;
+
+          // Construire l'URL de couverture à partir du template Kobo de Bookorbit (en utilisant CoverImageId du serveur)
+          const coverImageId = metadata.CoverImageId || bookId;
+          const coverUrl = `${config.baseUrl}/v1/books/${coverImageId}/thumbnail/300/400/false/image.jpg`;
+
+          // Récupérer le livre existant pour préserver le statut téléchargé localement
+          const existingBook = await db.books.get(bookId);
+          const downloaded = existingBook ? existingBook.downloaded : false;
+          const collections = existingBook ? existingBook.collections || [] : [];
+
+          const book: Book = {
+            id: bookId,
+            title,
+            authors,
+            description,
+            publisher,
+            publishedDate,
+            fileFormat,
+            fileSizeBytes,
+            fileHash,
+            coverUrl,
+            downloaded,
+            addedAt: entitlement?.Created || new Date().toISOString(),
+            updatedAt: entitlement?.LastModified || new Date().toISOString(),
+            collections
+          };
+
+          await db.books.put(book);
+
+          // Gérer l'état de lecture fourni à la création
+          if (ent.ReadingState) {
+            const currentBookmark = ent.ReadingState.CurrentBookmark;
+            if (currentBookmark) {
               const pct = currentBookmark.ProgressPercent ?? 0;
               const lastMod = currentBookmark.LastModified || new Date().toISOString();
               const location = currentBookmark.Location || null;
 
+              // Vérifier s'il y a un conflit avec un avancement local non synchronisé
               const localState = await db.readingStates.get(bookId);
-              const bookInfo = await db.books.get(bookId);
-              
               if (localState && !localState.synced && localState.progressPercent !== pct) {
+                // Détection de conflit !
                 onConflictDetected({
                   bookId,
-                  bookTitle: bookInfo?.title || 'Livre inconnu',
+                  bookTitle: title,
                   localProgress: localState.progressPercent,
                   localDate: localState.lastModified,
                   remoteProgress: pct,
                   remoteDate: lastMod
                 });
               } else {
+                // Pas de conflit, on applique l'état serveur
                 await db.readingStates.put({
                   bookId,
                   lastModified: lastMod,
                   progressPercent: pct,
                   location,
-                  statistics: state.Statistics || null,
-                  statusInfo: state.StatusInfo || null,
+                  statistics: ent.ReadingState.Statistics || null,
+                  statusInfo: ent.ReadingState.StatusInfo || null,
                   synced: true
                 });
               }
             }
           }
-          // C. Changement de tags/collections
-          else if (item.ChangedTag) {
-            const tag = item.ChangedTag.Tag;
-            const collectionName = tag.Name;
-            const bookEntitlementIds: string[] = Array.isArray(tag.Items) 
-              ? tag.Items.map((i: any) => i.RevisionId) 
-              : [];
+        }
+        // B. Changement de l'état de lecture seul
+        else if (item.ChangedReadingState) {
+          const state = item.ChangedReadingState.ReadingState;
+          const bookId = state?.EntitlementId;
+          const currentBookmark = state?.CurrentBookmark;
 
-            // Supprimer cette collection de tous les livres qui l'avaient
-            const allBooks = await db.books.toArray();
-            for (const b of allBooks) {
-              if (b.collections?.includes(collectionName)) {
-                const nextCols = b.collections.filter(c => c !== collectionName);
-                await db.books.update(b.id, { collections: nextCols });
-              }
-            }
+          if (bookId && currentBookmark) {
+            const pct = currentBookmark.ProgressPercent ?? 0;
+            const lastMod = currentBookmark.LastModified || new Date().toISOString();
+            const location = currentBookmark.Location || null;
 
-            // Ajouter la collection aux livres listés
-            for (const bid of bookEntitlementIds) {
-              const b = await db.books.get(bid);
-              if (b) {
-                const nextCols = Array.from(new Set([...(b.collections || []), collectionName]));
-                await db.books.update(bid, { collections: nextCols });
-              }
+            const localState = await db.readingStates.get(bookId);
+            const bookInfo = await db.books.get(bookId);
+            
+            if (localState && !localState.synced && localState.progressPercent !== pct) {
+              onConflictDetected({
+                bookId,
+                bookTitle: bookInfo?.title || 'Livre inconnu',
+                localProgress: localState.progressPercent,
+                localDate: localState.lastModified,
+                remoteProgress: pct,
+                remoteDate: lastMod
+              });
+            } else {
+              await db.readingStates.put({
+                bookId,
+                lastModified: lastMod,
+                progressPercent: pct,
+                location,
+                statistics: state.Statistics || null,
+                statusInfo: state.StatusInfo || null,
+                synced: true
+              });
             }
           }
         }
+        // C. Changement de tags/collections
+        else if (item.ChangedTag) {
+          const tag = item.ChangedTag.Tag;
+          const collectionName = tag.Name;
+          const bookEntitlementIds: string[] = Array.isArray(tag.Items) 
+            ? tag.Items.map((i: any) => i.RevisionId) 
+            : [];
 
-        pageCount++;
+          // Supprimer cette collection de tous les livres qui l'avaient
+          const allBooks = await db.books.toArray();
+          for (const b of allBooks) {
+            if (b.collections?.includes(collectionName)) {
+              const nextCols = b.collections.filter(c => c !== collectionName);
+              await db.books.update(b.id, { collections: nextCols });
+            }
+          }
+
+          // Ajouter la collection aux livres listés
+          for (const bid of bookEntitlementIds) {
+            const b = await db.books.get(bid);
+            if (b) {
+              const nextCols = Array.from(new Set([...(b.collections || []), collectionName]));
+              await db.books.update(bid, { collections: nextCols });
+            }
+          }
+        }
       }
 
-      if (syncToken) {
-        localStorage.setItem('bookorbit_sync_token', syncToken);
+      if (finalSyncToken) {
+        localStorage.setItem('bookorbit_sync_token', finalSyncToken);
       }
 
       const syncDateString = new Date().toLocaleString('fr-FR');
@@ -388,7 +400,18 @@ export const Library: React.FC<LibraryProps> = ({
         <div className="sync-overlay glass">
           <div className="sync-status-box">
             <RefreshCw className="spin" size={32} />
-            <p>{syncProgress}</p>
+            <p className="sync-title" style={{ fontWeight: 500, margin: '8px 0 0 0' }}>{syncProgress}</p>
+            {syncTotal > 0 && (
+              <>
+                <div className="sync-progress-bar-container">
+                  <div 
+                    className="sync-progress-bar-fill" 
+                    style={{ width: `${(syncProcessed / syncTotal) * 100}%` }}
+                  ></div>
+                </div>
+                <span className="sync-count" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{syncProcessed} / {syncTotal}</span>
+              </>
+            )}
           </div>
         </div>
       )}

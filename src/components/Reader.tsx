@@ -243,14 +243,14 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       let touchStartTime = 0;
       
       doc.addEventListener('touchstart', (e: TouchEvent) => {
-        touchStartX = e.changedTouches[0].screenX;
-        touchStartY = e.changedTouches[0].screenY;
+        touchStartX = e.changedTouches[0].clientX;
+        touchStartY = e.changedTouches[0].clientY;
         touchStartTime = Date.now();
       }, { passive: true });
       
       doc.addEventListener('touchend', (e: TouchEvent) => {
-        const touchEndX = e.changedTouches[0].screenX;
-        const touchEndY = e.changedTouches[0].screenY;
+        const touchEndX = e.changedTouches[0].clientX;
+        const touchEndY = e.changedTouches[0].clientY;
         const touchEndTime = Date.now();
         
         const diffX = touchEndX - touchStartX;
@@ -461,9 +461,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       {/* Barre de navigation haute */}
       <header className="reader-header glass" style={{ borderBottomColor: `rgba(${theme === 'dark' || theme === 'night' ? '255,255,255' : '0,0,0'}, 0.08)` }}>
         <div className="header-left" style={{ display: 'flex', alignItems: 'center' }}>
-          <button onClick={handleCloseReader} className="btn-back">
+          <button onClick={handleCloseReader} className="btn-back" title="Retour à la bibliothèque">
             <ArrowLeft size={20} />
-            <span className="back-text">Bibliothèque</span>
           </button>
           <button onClick={() => setShowToc(!showToc)} className="btn-toc" title="Table des matières" style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', marginLeft: '12px' }}>
             <Menu size={20} />

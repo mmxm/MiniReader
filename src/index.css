@@ -468,10 +468,15 @@ body {
   color: var(--text-secondary);
 }
 
+.btn-danger-icon {
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, 0.2) !important;
+}
+
 .btn-danger-icon:hover {
-  background: rgba(239, 68, 68, 0.15);
-  border-color: #ef4444;
-  color: #ef4444;
+  background: #ef4444 !important;
+  color: white !important;
+  border-color: #ef4444 !important;
 }
 
 /* Modals & Dialogs (Conflict & Dictionary) */
@@ -667,7 +672,7 @@ body {
   top: 0;
   left: 0;
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
   z-index: 200;
   display: flex;
   flex-direction: column;
@@ -1022,6 +1027,26 @@ body {
   box-shadow: var(--shadow-lg);
   max-width: 320px;
   text-align: center;
+}
+
+.sync-progress-bar-container {
+  width: 200px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+:root.light-theme .sync-progress-bar-container {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.sync-progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
 }
 
 /* Animations et micro-animations */
