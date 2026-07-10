@@ -42,11 +42,43 @@ export const Library: React.FC<LibraryProps> = ({
       const allBooks = await db.books.toArray();
       setBooks(allBooks);
 
-      // Détecter et corriger les anciennes URL de couverture (contenant l'ID du livre au lieu du CoverImageId)
-      const hasOldCoverUrls = allBooks.some(b => b.coverUrl.includes(`/books/${b.id}/`));
-      if (hasOldCoverUrls && allBooks.length > 0) {
-        console.warn('[Library] Anciennes URL de couverture détectées. Réinitialisation du jeton pour forcer un re-sync complet.');
-        localStorage.removeItem('bookorbit_sync_token');
+      // Détecter et migrer automatiquement les anciennes URL de couverture
+      const oldBooks = allBooks.filter(b => b.coverUrl.includes(`/books/${b.id}/`));
+      if (oldBooks.length > 0) {
+        console.warn(`[Library] ${oldBooks.length} anciennes URL de couverture détectées. Lancement de la migration...`);
+        const syncUrl = localStorage.getItem('bookorbit_sync_url');
+        if (syncUrl) {
+          const config = parseSyncUrl(syncUrl);
+          
+          for (const book of oldBooks) {
+            try {
+              const targetUrl = getRequestUrl(`${config.baseUrl}/v1/library/${book.id}/metadata`);
+              const response = await fetch(targetUrl, {
+                method: 'GET',
+                headers: {
+                  'Accept': 'application/json',
+                  'User-Agent': 'Kobo eReader'
+                }
+              });
+              
+              if (response.ok) {
+                const data = await response.json();
+                const metadata = Array.isArray(data) && data.length > 0 ? data[0] : null;
+                if (metadata && metadata.CoverImageId) {
+                  const coverUrl = `${config.baseUrl}/v1/books/${metadata.CoverImageId}/thumbnail/300/400/false/image.jpg`;
+                  await db.books.update(book.id, { coverUrl });
+                  console.log(`[Library] URL de couverture migrée pour : ${book.title}`);
+                }
+              }
+            } catch (err) {
+              console.error(`[Library] Échec de la migration de couverture pour ${book.title}:`, err);
+            }
+          }
+          
+          // Recharger la bibliothèque après migration
+          const updatedBooks = await db.books.toArray();
+          setBooks(updatedBooks);
+        }
       }
 
       // Extraire la liste unique des collections
