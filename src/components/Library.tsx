@@ -168,7 +168,33 @@ export const Library: React.FC<LibraryProps> = ({
           }
 
           const title = metadata.Title || 'Sans titre';
-          const authors = Array.isArray(metadata.Contributors) ? metadata.Contributors : (Array.isArray(metadata.Authors) ? metadata.Authors.map((a: any) => a.Name) : ['Auteur inconnu']);
+          // Extraction hyper-défensive des auteurs (gère tous les formats et casses possibles de BookOrbit)
+          const getAuthors = (meta: any): string[] => {
+            if (!meta) return ['Auteur inconnu'];
+            const fields = ['Contributors', 'contributors', 'Authors', 'authors', 'Author', 'author'];
+            for (const f of fields) {
+              const val = meta[f];
+              if (!val) continue;
+              if (Array.isArray(val)) {
+                const resolved = val.map((item: any) => {
+                  if (typeof item === 'string') return item.trim();
+                  if (item && typeof item === 'object') {
+                    return (item.Name || item.name || item.DisplayName || item.displayName || '').trim();
+                  }
+                  return '';
+                }).filter(n => n.length > 0);
+                if (resolved.length > 0) return resolved;
+              }
+              if (typeof val === 'string' && val.trim().length > 0) {
+                return [val.trim()];
+              }
+            }
+            return ['Auteur inconnu'];
+          };
+          const authors = getAuthors(metadata);
+
+          // Log de diagnostic pour analyser la structure de métadonnées brutes
+          console.log(`[Sync] Livre: "${title}", Auteurs résolus:`, authors, 'Métadonnées brutes:', metadata);
           const description = metadata.Description || null;
           const publisher = metadata.Publisher?.Name || null;
           const publishedDate = metadata.PublicationDate || null;
