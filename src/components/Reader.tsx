@@ -83,8 +83,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   useEffect(() => {
     loadAndRenderBook();
 
-    // Dummy listener pour iOS Safari afin de lui permettre de capturer les touches dans l'iframe
+    // Dummy listeners pour "réveiller" le tactile sur iOS Safari (fenêtre parent, document, body)
     const dummyTouchStart = () => {};
+    window.addEventListener('touchstart', dummyTouchStart, { passive: true });
+    document.addEventListener('touchstart', dummyTouchStart, { passive: true });
     document.body.addEventListener('touchstart', dummyTouchStart, { passive: true });
 
     // Raccourcis clavier au niveau parent (fenêtre principale)
@@ -107,6 +109,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       if (!isSavedRef.current) {
         saveProgressState(false);
       }
+      window.removeEventListener('touchstart', dummyTouchStart);
+      document.removeEventListener('touchstart', dummyTouchStart);
       document.body.removeEventListener('touchstart', dummyTouchStart);
       window.removeEventListener('keydown', handleParentKeydown);
       window.removeEventListener('visibilitychange', handleVisibilityOrBlur);
@@ -372,6 +376,14 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           }
         }
       };
+
+      // Dummy listener tactile pour "réveiller" le tactile sur iOS Safari dans l'iframe
+      if (contents.document) {
+        contents.document.addEventListener('touchstart', () => {}, { passive: true });
+        if (contents.document.body) {
+          contents.document.body.addEventListener('touchstart', () => {}, { passive: true });
+        }
+      }
 
       // Attacher les écouteurs de façon robuste via contents.on d'epub.js (méthode officielle)
       if (typeof contents.on === 'function') {

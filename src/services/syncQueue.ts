@@ -62,18 +62,19 @@ export const syncQueueService = {
 
     const syncUrl = this.getSyncUrl();
     if (syncUrl && navigator.onLine) {
-      try {
-        await koboSyncApi.updateReadingState(syncUrl, bookId, payload);
-        // Marquage comme synchronisé si succès
-        await db.readingStates.update(bookId, { synced: true });
-        console.log(`[Sync] Progression synchronisée en ligne pour le livre ${bookId}.`);
-      } catch (error) {
-        console.warn(`[Sync] Échec de synchronisation immédiate pour ${bookId}. Ajout à la file d'attente.`, error);
-        await db.syncQueue.put({ bookId, payload, timestamp: Date.now() });
-      }
+      // Envoyer la progression au serveur en tâche de fond pour ne pas bloquer l'appelant (retour Bibliothèque instantané)
+      koboSyncApi.updateReadingState(syncUrl, bookId, payload)
+        .then(async () => {
+          await db.readingStates.update(bookId, { synced: true });
+          console.log(`[Sync] Progression synchronisée en ligne pour le livre ${bookId}.`);
+        })
+        .catch(async (error) => {
+          console.warn(`[Sync] Échec de synchronisation immédiate pour ${bookId}. Ajout à la file d'attente.`, error);
+          await db.syncQueue.put({ bookId, payload, timestamp: Date.now() });
+        });
     } else {
       console.log(`[Sync] Appareil hors ligne. Progression pour le livre ${bookId} mise en file d'attente.`);
-      await db.syncQueue.put({ bookId, payload, timestamp: Date.now() });
+      db.syncQueue.put({ bookId, payload, timestamp: Date.now() }).catch(() => undefined);
     }
   },
 
