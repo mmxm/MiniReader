@@ -405,8 +405,14 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       const targetWidth = Math.max(200, parentWidth - (2 * margin));
       containerRef.current.style.width = `${targetWidth}px`;
       
+      // Calculer une hauteur de secours valide si clientHeight est temporairement à 0
+      const parentHeight = containerRef.current.parentElement?.clientHeight || 0;
+      const targetHeight = parentHeight > 100 ? parentHeight : (window.innerHeight - 120);
+      
+      console.log(`[Reader Layout] Resizing rendition to ${targetWidth}x${targetHeight} (parent: ${parentWidth}x${parentHeight})`);
+      
       // Forcer le recalcul des dimensions par epub.js en lui passant les pixels réels calculés
-      rendition.resize(targetWidth, containerRef.current.clientHeight);
+      rendition.resize(targetWidth, targetHeight);
     }
   };
 
