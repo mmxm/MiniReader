@@ -3,6 +3,34 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 
+// Intercepter la console pour le diagnostic en direct sur mobile/tablette
+const logHistory: string[] = [];
+if (typeof window !== 'undefined') {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+
+  console.log = (...args) => {
+    logHistory.push(`[${new Date().toLocaleTimeString()}] [LOG] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}`);
+    if (logHistory.length > 150) logHistory.shift();
+    originalLog.apply(console, args);
+  };
+
+  console.warn = (...args) => {
+    logHistory.push(`[${new Date().toLocaleTimeString()}] [WARN] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}`);
+    if (logHistory.length > 150) logHistory.shift();
+    originalWarn.apply(console, args);
+  };
+
+  console.error = (...args) => {
+    logHistory.push(`[${new Date().toLocaleTimeString()}] [ERROR] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}`);
+    if (logHistory.length > 150) logHistory.shift();
+    originalError.apply(console, args);
+  };
+
+  (window as any).__logHistory = logHistory;
+}
+
 import { registerSW } from 'virtual:pwa-register'
 
 // Enregistrement du service worker avec mise à jour forcée automatique

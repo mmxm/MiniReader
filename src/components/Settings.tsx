@@ -23,6 +23,15 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
     dictionaryCount: 0,
     queueCount: 0,
   });
+  const [showLogs, setShowLogs] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const handleToggleLogs = () => {
+    if (!showLogs) {
+      setLogs((window as any).__logHistory || []);
+    }
+    setShowLogs(!showLogs);
+  };
 
   useEffect(() => {
     const savedUrl = localStorage.getItem('bookorbit_sync_url') || '';
@@ -237,6 +246,55 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
             Forcer une synchronisation complète
           </button>
         </div>
+      </div>
+
+      {/* Console de diagnostic */}
+      <div className="card settings-card" style={{ marginTop: '24px' }}>
+        <h2 className="card-title" style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} onClick={handleToggleLogs}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>📋 Diagnostic &amp; Logs</span>
+          <button type="button" className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 8px' }}>
+            {showLogs ? 'Masquer' : 'Afficher'}
+          </button>
+        </h2>
+        {showLogs && (
+          <div style={{ marginTop: '16px' }}>
+            <button 
+              type="button"
+              onClick={() => setLogs((window as any).__logHistory || [])} 
+              className="btn btn-secondary" 
+              style={{ marginBottom: '12px', fontSize: '12px', padding: '4px 8px' }}
+            >
+              Rafraîchir
+            </button>
+            <div style={{ 
+              backgroundColor: 'rgba(0,0,0,0.2)', 
+              borderRadius: '4px', 
+              padding: '12px', 
+              maxHeight: '250px', 
+              overflowY: 'auto', 
+              fontFamily: 'monospace', 
+              fontSize: '11px',
+              whiteSpace: 'pre-wrap',
+              border: '1px solid rgba(255,255,255,0.05)',
+              textAlign: 'left'
+            }}>
+              {logs.length === 0 ? (
+                <span style={{ color: 'var(--text-muted)' }}>Aucun log enregistré pour l'instant.</span>
+              ) : (
+                logs.map((log, i) => {
+                  let color = 'inherit';
+                  if (log.includes('[WARN]')) color = '#f59e0b';
+                  if (log.includes('[ERROR]')) color = '#ef4444';
+                  return (
+                    <div key={i} style={{ color, marginBottom: '6px', borderBottom: '1px solid rgba(255,255,255,0.02)', paddingBottom: '4px' }}>
+                      {log}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="version-info">

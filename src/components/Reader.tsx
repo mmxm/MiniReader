@@ -625,6 +625,98 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     ));
   };
 
+  // Listeners de secours sur le conteneur parent (epub-container) pour les clics et touchers bloqués ou capturés par epub.js
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || isLoading) return;
+
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let lastTapTime = 0;
+
+    const handleParentClick = (e: MouseEvent) => {
+      // Ignorer si le clic provient d'une interface de réglages, en-tête, barre basse ou d'un bouton
+      const target = e.target as HTMLElement;
+      if (
+        target.closest('.reader-settings-menu') || 
+        target.closest('.reader-header') || 
+        target.closest('.reader-footer') || 
+        target.closest('.btn-back') || 
+        target.closest('.btn-settings') || 
+        target.closest('.btn-toc') ||
+        target.closest('.btn-close-sidebar')
+      ) {
+        return;
+      }
+      
+      const width = container.clientWidth;
+      const clickX = e.clientX - container.getBoundingClientRect().left;
+
+      if (clickX < width * 0.25) {
+        handlePrevPage();
+      } else if (clickX > width * 0.75) {
+        handleNextPage();
+      }
+    };
+
+    const handleParentTouchStart = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+    };
+
+    const handleParentTouchEnd = (e: TouchEvent) => {
+      const touch = e.changedTouches[0];
+      const diffX = touch.clientX - touchStartX;
+      const diffY = touch.clientY - touchStartY;
+
+      // Ignorer si le geste provient d'une interface
+      const target = e.target as HTMLElement;
+      if (
+        target.closest('.reader-settings-menu') || 
+        target.closest('.reader-header') || 
+        target.closest('.reader-footer')
+      ) {
+        return;
+      }
+
+      // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
+      if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80) {
+        if (diffX < 0) {
+          handleNextPage(); // swipe gauche -> suivant
+        } else {
+          handlePrevPage(); // swipe droite -> précédent
+        }
+        return;
+      }
+
+      // Tap (mouvement < 15px, sans contrainte temporelle stricte)
+      if (Math.abs(diffX) < 15 && Math.abs(diffY) < 15) {
+        if (Date.now() - lastTapTime < 500) return;
+        lastTapTime = Date.now();
+        
+        const width = container.clientWidth;
+        const clickX = touch.clientX - container.getBoundingClientRect().left;
+
+        if (clickX < width * 0.25) {
+          handlePrevPage();
+        } else if (clickX > width * 0.75) {
+          handleNextPage();
+        }
+      }
+    };
+
+    container.addEventListener('click', handleParentClick);
+    container.addEventListener('touchstart', handleParentTouchStart, { passive: true });
+    container.addEventListener('touchend', handleParentTouchEnd, { passive: true });
+
+    return () => {
+      container.removeEventListener('click', handleParentClick);
+      container.removeEventListener('touchstart', handleParentTouchStart);
+      container.removeEventListener('touchend', handleParentTouchEnd);
+    };
+  }, [isLoading]);
+
   return (
     <div className="reader-wrapper" style={{ backgroundColor: activeThemeObj.bg, color: activeThemeObj.text }}>
       {/* Barre de navigation haute */}
@@ -663,6 +755,17 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       {/* Menu Options de police & thèmes */}
       {showSettingsMenu && (
         <div className="reader-settings-menu glass animate-fade-in">
+          <div className="settings-menu-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '8px' }}>
+            <span style={{ fontWeight: 600, fontSize: '14px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-secondary)' }}>Options d'affichage</span>
+            <button 
+              type="button"
+              onClick={() => setShowSettingsMenu(false)} 
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '4px' }}
+              title="Fermer le menu"
+            >
+              <X size={18} />
+            </button>
+          </div>
           <div className="settings-section">
             <span className="settings-label">Taille du texte</span>
             <div className="adjust-control">
