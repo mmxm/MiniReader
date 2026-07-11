@@ -394,15 +394,19 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     rendition.themes.select('default');
     
-    // Mettre à jour la couleur d'arrière-plan du container parent et la marge latérale (pour réduire l'iframe)
+    // Mettre à jour la couleur d'arrière-plan du container parent et la largeur physique (pour centrer et ajuster l'iframe)
     if (containerRef.current) {
       containerRef.current.style.backgroundColor = activeTheme.bg;
-      containerRef.current.style.paddingLeft = `${margin}px`;
-      containerRef.current.style.paddingRight = `${margin}px`;
+      containerRef.current.style.paddingLeft = '0px';
+      containerRef.current.style.paddingRight = '0px';
       containerRef.current.style.boxSizing = 'border-box';
       
-      // Forcer le recalcul des dimensions par epub.js en lui passant les pixels réels du conteneur parent
-      rendition.resize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+      const parentWidth = containerRef.current.parentElement?.clientWidth || window.innerWidth;
+      const targetWidth = Math.max(200, parentWidth - (2 * margin));
+      containerRef.current.style.width = `${targetWidth}px`;
+      
+      // Forcer le recalcul des dimensions par epub.js en lui passant les pixels réels calculés
+      rendition.resize(targetWidth, containerRef.current.clientHeight);
     }
   };
 
