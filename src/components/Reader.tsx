@@ -379,7 +379,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         'font-family': `${fontFamily} !important`,
         'font-size': `${fontSize}% !important`,
         'line-height': `${lineHeight} !important`,
-        'padding': `0 !important`, // Supprimé la marge interne qui bugge sur iOS
+        'padding': `0 ${margin}px !important`, // Rétablir le padding natif de l'iframe
         'text-align': 'justify !important',
       },
       p: {
@@ -394,25 +394,13 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     rendition.themes.select('default');
     
-    // Mettre à jour la couleur d'arrière-plan du container parent et la largeur physique (pour centrer et ajuster l'iframe)
+    // Mettre à jour la couleur d'arrière-plan du container parent
     if (containerRef.current) {
       containerRef.current.style.backgroundColor = activeTheme.bg;
+      containerRef.current.style.width = '100%';
       containerRef.current.style.paddingLeft = '0px';
       containerRef.current.style.paddingRight = '0px';
       containerRef.current.style.boxSizing = 'border-box';
-      
-      const parentWidth = containerRef.current.parentElement?.clientWidth || window.innerWidth;
-      const targetWidth = Math.max(200, parentWidth - (2 * margin));
-      containerRef.current.style.width = `${targetWidth}px`;
-      
-      // Calculer une hauteur de secours valide si clientHeight est temporairement à 0
-      const parentHeight = containerRef.current.parentElement?.clientHeight || 0;
-      const targetHeight = parentHeight > 100 ? parentHeight : (window.innerHeight - 120);
-      
-      console.log(`[Reader Layout] Resizing rendition to ${targetWidth}x${targetHeight} (parent: ${parentWidth}x${parentHeight})`);
-      
-      // Forcer le recalcul des dimensions par epub.js en lui passant les pixels réels calculés
-      rendition.resize(targetWidth, targetHeight);
     }
   };
 
