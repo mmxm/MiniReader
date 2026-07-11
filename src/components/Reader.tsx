@@ -301,25 +301,24 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     // Enregistrer les écouteurs d'événements dans le document de l'iframe
     rendition.hooks.content.register((contents: any) => {
-      const doc = contents.document;
-      const el = doc.body || doc.documentElement || doc;
       let lastTapTime = 0;
-      
-      // Clavier (touches fléchées)
-      el.addEventListener('keydown', (e: KeyboardEvent) => {
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let touchStartTime = 0;
+
+      const handleKeydown = (e: KeyboardEvent) => {
         if (e.key === 'ArrowRight') handleNextPage();
         if (e.key === 'ArrowLeft') handlePrevPage();
-      });
-      
-      // Clics sur les 25% latéraux
-      el.addEventListener('click', (e: MouseEvent) => {
-        const selection = doc.getSelection();
+      };
+
+      const handleClick = (e: MouseEvent) => {
+        const selection = contents.window?.getSelection() || contents.document?.getSelection();
         if (selection && selection.toString().trim().length > 0) return; // Ne pas tourner si sélection de mot
         
         // Bloquer l'événement s'il a déjà été traité par un événement tactile touchend
         if (Date.now() - lastTapTime < 500) return;
 
-        const width = contents.window.innerWidth || doc.documentElement.clientWidth;
+        const width = contents.window?.innerWidth || contents.document?.documentElement?.clientWidth || 375;
         const clickX = e.clientX;
         
         if (clickX < width * 0.25) {
@@ -327,23 +326,18 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         } else if (clickX > width * 0.75) {
           handleNextPage();
         }
-      });
-      
-      // Touch/Swipe
-      let touchStartX = 0;
-      let touchStartY = 0;
-      let touchStartTime = 0;
-      
-      el.addEventListener('touchstart', (e: TouchEvent) => {
+      };
+
+      const handleTouchStart = (e: TouchEvent) => {
         const touch = e.changedTouches?.[0] || e.touches?.[0];
         if (!touch) return;
 
         touchStartX = touch.clientX;
         touchStartY = touch.clientY;
         touchStartTime = Date.now();
-      }, { passive: true });
-      
-      el.addEventListener('touchend', (e: TouchEvent) => {
+      };
+
+      const handleTouchEnd = (e: TouchEvent) => {
         const touch = e.changedTouches?.[0] || e.touches?.[0];
         if (!touch) return;
 
@@ -368,7 +362,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         // Tap (seuil : mouvement < 10px, temps < 200ms)
         if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && timeDiff < 200) {
           lastTapTime = Date.now();
-          const width = contents.window.innerWidth || doc.documentElement.clientWidth;
+          const width = contents.window?.innerWidth || contents.document?.documentElement?.clientWidth || 375;
           const clickX = touch.clientX;
           
           if (clickX < width * 0.25) {
@@ -377,7 +371,24 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
             handleNextPage();
           }
         }
-      }, { passive: true });
+      };
+
+      // Attacher les écouteurs de façon robuste via contents.on d'epub.js (méthode officielle)
+      if (typeof contents.on === 'function') {
+        contents.on('keydown', handleKeydown);
+        contents.on('click', handleClick);
+        contents.on('touchstart', handleTouchStart);
+        contents.on('touchend', handleTouchEnd);
+      } else {
+        // Fallback si contents.on est manquant
+        const el = contents.document?.body || contents.document?.documentElement || contents.document;
+        if (el) {
+          el.addEventListener('keydown', handleKeydown);
+          el.addEventListener('click', handleClick);
+          el.addEventListener('touchstart', handleTouchStart, { passive: true });
+          el.addEventListener('touchend', handleTouchEnd, { passive: true });
+        }
+      }
     });
 
   };
