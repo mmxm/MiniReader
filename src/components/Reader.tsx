@@ -71,6 +71,9 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   });
 
   const isSavedRef = useRef(false);
+  const touchStartXRef = useRef(0);
+  const touchStartYRef = useRef(0);
+  const lastTapTimeRef = useRef(0);
 
   // Définition des thèmes graphiques pour l'iframe epub.js
   const themeStyles = {
@@ -639,108 +642,118 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     ));
   };
 
+  const handleParentClick = (e: MouseEvent) => {
+    console.log('[Touch Parent] Click event detected on parent container');
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Ignorer si le clic provient d'une interface de réglages, en-tête, barre basse ou d'un bouton
+    const target = e.target as HTMLElement;
+    if (
+      target.closest('.reader-settings-menu') || 
+      target.closest('.reader-header') || 
+      target.closest('.reader-footer') || 
+      target.closest('.btn-back') || 
+      target.closest('.btn-settings') || 
+      target.closest('.btn-toc') ||
+      target.closest('.btn-close-sidebar')
+    ) {
+      console.log('[Touch Parent] Click on UI element, ignored');
+      return;
+    }
+    
+    const width = container.clientWidth;
+    const clickX = e.clientX - container.getBoundingClientRect().left;
+
+    if (clickX < width * 0.25) {
+      console.log('[Touch Parent] Click left 25%, turning page prev');
+      handlePrevPage();
+    } else if (clickX > width * 0.75) {
+      console.log('[Touch Parent] Click right 25%, turning page next');
+      handleNextPage();
+    }
+  };
+
+  const handleParentTouchStart = (e: TouchEvent | React.TouchEvent) => {
+    console.log('[Touch Parent] touchstart event detected');
+    const touch = 'touches' in e ? e.touches[0] : (e as any).changedTouches[0];
+    if (!touch) return;
+    touchStartXRef.current = touch.clientX;
+    touchStartYRef.current = touch.clientY;
+  };
+
+  const handleParentTouchEnd = (e: TouchEvent | React.TouchEvent) => {
+    console.log('[Touch Parent] touchend event detected');
+    const touch = 'changedTouches' in e ? e.changedTouches[0] : (e as any).touches[0];
+    if (!touch) return;
+    const diffX = touch.clientX - touchStartXRef.current;
+    const diffY = touch.clientY - touchStartYRef.current;
+
+    console.log(`[Touch Parent] touchend coordinates diffX=${Math.round(diffX)} diffY=${Math.round(diffY)}`);
+
+    // Ignorer si le geste provient d'une interface
+    const target = e.target as HTMLElement;
+    if (
+      target.closest('.reader-settings-menu') || 
+      target.closest('.reader-header') || 
+      target.closest('.reader-footer')
+    ) {
+      console.log('[Touch Parent] Gestures on UI element, ignored');
+      return;
+    }
+
+    // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
+    if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80) {
+      if (diffX < 0) {
+        console.log('[Touch Parent] Swipe horizontal left, turning page next');
+        handleNextPage();
+      } else {
+        console.log('[Touch Parent] Swipe horizontal right, turning page prev');
+        handlePrevPage();
+      }
+      return;
+    }
+    
+    // Tap de secours (mouvement < 15px) - UNIQUEMENT si l'événement provient de l'iframe directement
+    // et que l'overlay n'a pas pu l'intercepter. Pour les overlays, onClick suffit.
+    if (Math.abs(diffX) < 15 && Math.abs(diffY) < 15) {
+      if (target.closest('.mobile-touch-zone')) {
+        console.log('[Touch Parent] Tap on overlay, letting onClick handle it');
+        return;
+      }
+
+      if (Date.now() - lastTapTimeRef.current < 500) return;
+      lastTapTimeRef.current = Date.now();
+      
+      const container = containerRef.current;
+      if (!container) return;
+      
+      const width = container.clientWidth;
+      const clickX = touch.clientX - container.getBoundingClientRect().left;
+
+      if (clickX < width * 0.25) {
+        console.log('[Touch Parent] Tap left 25% (secours), turning page prev');
+        handlePrevPage();
+      } else if (clickX > width * 0.75) {
+        console.log('[Touch Parent] Tap right 25% (secours), turning page next');
+        handleNextPage();
+      }
+    }
+  };
+
   // Listeners de secours sur le conteneur parent (epub-container) pour les clics et touchers bloqués ou capturés par epub.js
   useEffect(() => {
     const container = containerRef.current;
     if (!container || isLoading) return;
 
-    let touchStartX = 0;
-    let touchStartY = 0;
-    let lastTapTime = 0;
-
-    const handleParentClick = (e: MouseEvent) => {
-      console.log('[Touch Parent] Click event detected on parent container');
-      // Ignorer si le clic provient d'une interface de réglages, en-tête, barre basse ou d'un bouton
-      const target = e.target as HTMLElement;
-      if (
-        target.closest('.reader-settings-menu') || 
-        target.closest('.reader-header') || 
-        target.closest('.reader-footer') || 
-        target.closest('.btn-back') || 
-        target.closest('.btn-settings') || 
-        target.closest('.btn-toc') ||
-        target.closest('.btn-close-sidebar')
-      ) {
-        console.log('[Touch Parent] Click on UI element, ignored');
-        return;
-      }
-      
-      const width = container.clientWidth;
-      const clickX = e.clientX - container.getBoundingClientRect().left;
-
-      if (clickX < width * 0.25) {
-        console.log('[Touch Parent] Click left 25%, turning page prev');
-        handlePrevPage();
-      } else if (clickX > width * 0.75) {
-        console.log('[Touch Parent] Click right 25%, turning page next');
-        handleNextPage();
-      }
-    };
-
-    const handleParentTouchStart = (e: TouchEvent) => {
-      console.log('[Touch Parent] touchstart event detected');
-      const touch = e.touches[0];
-      touchStartX = touch.clientX;
-      touchStartY = touch.clientY;
-    };
-
-    const handleParentTouchEnd = (e: TouchEvent) => {
-      console.log('[Touch Parent] touchend event detected');
-      const touch = e.changedTouches[0];
-      const diffX = touch.clientX - touchStartX;
-      const diffY = touch.clientY - touchStartY;
-
-      console.log(`[Touch Parent] touchend coordinates diffX=${Math.round(diffX)} diffY=${Math.round(diffY)}`);
-
-      // Ignorer si le geste provient d'une interface
-      const target = e.target as HTMLElement;
-      if (
-        target.closest('.reader-settings-menu') || 
-        target.closest('.reader-header') || 
-        target.closest('.reader-footer')
-      ) {
-        console.log('[Touch Parent] Gestures on UI element, ignored');
-        return;
-      }
-
-      // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
-      if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80) {
-        if (diffX < 0) {
-          console.log('[Touch Parent] Swipe horizontal left, turning page next');
-          handleNextPage();
-        } else {
-          console.log('[Touch Parent] Swipe horizontal right, turning page prev');
-          handlePrevPage();
-        }
-        return;
-      }
-
-      // Tap (mouvement < 15px, sans contrainte temporelle stricte)
-      if (Math.abs(diffX) < 15 && Math.abs(diffY) < 15) {
-        if (Date.now() - lastTapTime < 500) return;
-        lastTapTime = Date.now();
-        
-        const width = container.clientWidth;
-        const clickX = touch.clientX - container.getBoundingClientRect().left;
-
-        if (clickX < width * 0.25) {
-          console.log('[Touch Parent] Tap left 25%, turning page prev');
-          handlePrevPage();
-        } else if (clickX > width * 0.75) {
-          console.log('[Touch Parent] Tap right 25%, turning page next');
-          handleNextPage();
-        }
-      }
-    };
-
     container.addEventListener('click', handleParentClick);
-    container.addEventListener('touchstart', handleParentTouchStart, { passive: true });
-    container.addEventListener('touchend', handleParentTouchEnd, { passive: true });
+    container.addEventListener('touchstart', handleParentTouchStart as any, { passive: true });
+    container.addEventListener('touchend', handleParentTouchEnd as any, { passive: true });
 
     return () => {
       container.removeEventListener('click', handleParentClick);
-      container.removeEventListener('touchstart', handleParentTouchStart);
-      container.removeEventListener('touchend', handleParentTouchEnd);
+      container.removeEventListener('touchstart', handleParentTouchStart as any);
+      container.removeEventListener('touchend', handleParentTouchEnd as any);
     };
   }, [isLoading]);
 
@@ -900,6 +913,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
                   handlePrevPage();
                 }
               }}
+              onTouchStart={handleParentTouchStart}
+              onTouchEnd={handleParentTouchEnd}
               style={{
                 position: 'absolute',
                 left: 0,
@@ -927,6 +942,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
                   handleNextPage();
                 }
               }}
+              onTouchStart={handleParentTouchStart}
+              onTouchEnd={handleParentTouchEnd}
               style={{
                 position: 'absolute',
                 right: 0,
