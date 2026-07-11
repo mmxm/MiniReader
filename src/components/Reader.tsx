@@ -349,8 +349,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const diffY = touchEndY - touchStartY;
         const timeDiff = touchEndTime - touchStartTime;
         
-        // Swipe horizontal (seuil : 40px de distance, < 300ms de temps, Y peu décalé)
-        if (Math.abs(diffX) > 40 && Math.abs(diffY) < 80 && timeDiff < 300) {
+        // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
+        if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80 && timeDiff < 400) {
           if (diffX < 0) {
             handleNextPage(); // swipe gauche -> suivant
           } else {
@@ -359,8 +359,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           return;
         }
         
-        // Tap (seuil : mouvement < 10px, temps < 200ms)
-        if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && timeDiff < 200) {
+        // Tap (seuil : mouvement < 15px sans contrainte temporelle trop stricte pour iOS)
+        if (Math.abs(diffX) < 15 && Math.abs(diffY) < 15) {
           lastTapTime = Date.now();
           const width = contents.window?.innerWidth || contents.document?.documentElement?.clientWidth || 375;
           const clickX = touch.clientX;
