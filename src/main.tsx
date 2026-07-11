@@ -16,6 +16,14 @@ const updateSW = registerSW({
   }
 });
 
+// Vérifier les mises à jour lorsque l'application redevient visible (retour application ou focus)
+if (typeof window !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      updateSW();
+    }
+  });
+}
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

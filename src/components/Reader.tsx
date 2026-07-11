@@ -302,16 +302,17 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     // Enregistrer les écouteurs d'événements dans le document de l'iframe
     rendition.hooks.content.register((contents: any) => {
       const doc = contents.document;
+      const el = doc.body || doc.documentElement || doc;
       let lastTapTime = 0;
       
       // Clavier (touches fléchées)
-      doc.addEventListener('keydown', (e: KeyboardEvent) => {
+      el.addEventListener('keydown', (e: KeyboardEvent) => {
         if (e.key === 'ArrowRight') handleNextPage();
         if (e.key === 'ArrowLeft') handlePrevPage();
       });
       
       // Clics sur les 25% latéraux
-      doc.addEventListener('click', (e: MouseEvent) => {
+      el.addEventListener('click', (e: MouseEvent) => {
         const selection = doc.getSelection();
         if (selection && selection.toString().trim().length > 0) return; // Ne pas tourner si sélection de mot
         
@@ -333,7 +334,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       let touchStartY = 0;
       let touchStartTime = 0;
       
-      doc.addEventListener('touchstart', (e: TouchEvent) => {
+      el.addEventListener('touchstart', (e: TouchEvent) => {
         const touch = e.changedTouches?.[0] || e.touches?.[0];
         if (!touch) return;
 
@@ -342,7 +343,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         touchStartTime = Date.now();
       }, { passive: true });
       
-      doc.addEventListener('touchend', (e: TouchEvent) => {
+      el.addEventListener('touchend', (e: TouchEvent) => {
         const touch = e.changedTouches?.[0] || e.touches?.[0];
         if (!touch) return;
 
@@ -354,8 +355,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const diffY = touchEndY - touchStartY;
         const timeDiff = touchEndTime - touchStartTime;
         
-        // Swipe horizontal (seuil : 50px de distance, < 300ms de temps, Y peu décalé)
-        if (Math.abs(diffX) > 50 && Math.abs(diffY) < 100 && timeDiff < 300) {
+        // Swipe horizontal (seuil : 40px de distance, < 300ms de temps, Y peu décalé)
+        if (Math.abs(diffX) > 40 && Math.abs(diffY) < 80 && timeDiff < 300) {
           if (diffX < 0) {
             handleNextPage(); // swipe gauche -> suivant
           } else {
@@ -378,6 +379,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         }
       }, { passive: true });
     });
+
   };
 
   const updatePercentage = () => {

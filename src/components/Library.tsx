@@ -45,10 +45,11 @@ export const Library: React.FC<LibraryProps> = ({
       setBooks(allBooks);
       // Détecter et réparer automatiquement les métadonnées (auteurs et URL de couvertures) en arrière-plan
       const booksToRepair = allBooks.filter(b => 
-        (b.authors.length === 0 || b.authors.includes('Auteur inconnu') || b.authors.includes('auteur inconnu')) ||
+        (b.authors.length === 0 || b.authors.some(a => a.toLowerCase() === 'auteur inconnu')) ||
         b.coverUrl.includes(`/books/${b.id}/`)
       );
 
+      console.warn(`[Library Diagnostic] Nombre de livres à réparer/migrer : ${booksToRepair.length}`);
       if (booksToRepair.length > 0) {
         console.warn(`[Library] ${booksToRepair.length} livres à réparer/migrer détectés. Lancement du traitement en arrière-plan...`);
         const syncUrl = localStorage.getItem('bookorbit_sync_url');
