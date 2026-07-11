@@ -71,9 +71,6 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   });
 
   const isSavedRef = useRef(false);
-  const touchStartXRef = useRef(0);
-  const touchStartYRef = useRef(0);
-  const lastTapTimeRef = useRef(0);
 
   // Définition des thèmes graphiques pour l'iframe epub.js
   const themeStyles = {
@@ -160,6 +157,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       });
 
       if (!containerRef.current) return;
+      containerRef.current.innerHTML = ''; // Nettoyer le conteneur pour éviter les duplications d'iframe sur iOS
 
       const rendition = book.renderTo(containerRef.current, {
         width: '100%',
@@ -309,9 +307,6 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     // Enregistrer les écouteurs d'événements dans le document de l'iframe
     rendition.hooks.content.register((contents: any) => {
       let lastTapTime = 0;
-      let touchStartX = 0;
-      let touchStartY = 0;
-      let touchStartTime = 0;
 
       const handleKeydown = (e: KeyboardEvent) => {
         if (e.key === 'ArrowRight') handleNextPage();
@@ -326,7 +321,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           return;
         }
         
-        // Bloquer l'événement s'il a déjà été traité par un événement tactile touchend
+        // Bloquer l'événement s'il a déjà été traité par un événement tactile
         if (Date.now() - lastTapTime < 500) return;
 
         const width = contents.window?.innerWidth || contents.document?.documentElement?.clientWidth || 375;
@@ -341,81 +336,16 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         }
       };
 
-      const handleTouchStart = (e: TouchEvent) => {
-        console.log('[Touch Iframe] touchstart event detected');
-        const touch = e.changedTouches?.[0] || e.touches?.[0];
-        if (!touch) return;
-
-        touchStartX = touch.clientX;
-        touchStartY = touch.clientY;
-        touchStartTime = Date.now();
-      };
-
-      const handleTouchEnd = (e: TouchEvent) => {
-        console.log('[Touch Iframe] touchend event detected');
-        const touch = e.changedTouches?.[0] || e.touches?.[0];
-        if (!touch) return;
-
-        const touchEndX = touch.clientX;
-        const touchEndY = touch.clientY;
-        const touchEndTime = Date.now();
-        
-        const diffX = touchEndX - touchStartX;
-        const diffY = touchEndY - touchStartY;
-        const timeDiff = touchEndTime - touchStartTime;
-
-        console.log(`[Touch Iframe] touchend coordinates diffX=${Math.round(diffX)} diffY=${Math.round(diffY)} timeDiff=${timeDiff}ms`);
-        
-        // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
-        if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80 && timeDiff < 400) {
-          if (diffX < 0) {
-            console.log('[Touch Iframe] Swipe horizontal left, turning page next');
-            handleNextPage();
-          } else {
-            console.log('[Touch Iframe] Swipe horizontal right, turning page prev');
-            handlePrevPage();
-          }
-          return;
-        }
-        
-        // Tap (seuil : mouvement < 15px sans contrainte temporelle trop stricte pour iOS)
-        if (Math.abs(diffX) < 15 && Math.abs(diffY) < 15) {
-          lastTapTime = Date.now();
-          const width = contents.window?.innerWidth || contents.document?.documentElement?.clientWidth || 375;
-          const clickX = touch.clientX;
-          
-          if (clickX < width * 0.25) {
-            console.log('[Touch Iframe] Tap left 25%, turning page prev');
-            handlePrevPage();
-          } else if (clickX > width * 0.75) {
-            console.log('[Touch Iframe] Tap right 25%, turning page next');
-            handleNextPage();
-          }
-        }
-      };
-
-      // Dummy listener tactile pour "réveiller" le tactile sur iOS Safari dans l'iframe
-      if (contents.document) {
-        contents.document.addEventListener('touchstart', () => {}, { passive: true });
-        if (contents.document.body) {
-          contents.document.body.addEventListener('touchstart', () => {}, { passive: true });
-        }
-      }
-
       // Attacher les écouteurs de façon robuste via contents.on d'epub.js (méthode officielle)
       if (typeof contents.on === 'function') {
         contents.on('keydown', handleKeydown);
         contents.on('click', handleClick);
-        contents.on('touchstart', handleTouchStart);
-        contents.on('touchend', handleTouchEnd);
       } else {
         // Fallback si contents.on est manquant
         const el = contents.document?.body || contents.document?.documentElement || contents.document;
         if (el) {
           el.addEventListener('keydown', handleKeydown);
           el.addEventListener('click', handleClick);
-          el.addEventListener('touchstart', handleTouchStart, { passive: true });
-          el.addEventListener('touchend', handleTouchEnd, { passive: true });
         }
       }
     });
@@ -449,7 +379,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         'font-family': `${fontFamily} !important`,
         'font-size': `${fontSize}% !important`,
         'line-height': `${lineHeight} !important`,
-        'padding': `0 ${margin}px !important`,
+        'padding': `0 !important`, // Supprimé la marge interne qui bugge sur iOS
         'text-align': 'justify !important',
       },
       p: {
@@ -464,9 +394,15 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     rendition.themes.select('default');
     
-    // Mettre à jour la couleur d'arrière-plan du container parent pour éviter les flashs blancs
+    // Mettre à jour la couleur d'arrière-plan du container parent et la marge latérale (pour réduire l'iframe)
     if (containerRef.current) {
       containerRef.current.style.backgroundColor = activeTheme.bg;
+      containerRef.current.style.paddingLeft = `${margin}px`;
+      containerRef.current.style.paddingRight = `${margin}px`;
+      containerRef.current.style.boxSizing = 'border-box';
+      
+      // Forcer le recalcul des dimensions par epub.js en lui passant les pixels réels du conteneur parent
+      rendition.resize(containerRef.current.clientWidth, containerRef.current.clientHeight);
     }
   };
 
@@ -550,6 +486,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       renditionRef.current.destroy();
       
       if (containerRef.current) {
+        containerRef.current.innerHTML = ''; // Nettoyer le conteneur pour éviter les duplications d'iframe sur iOS
         const rendition = epubBookRef.current.renderTo(containerRef.current, {
           width: '100%',
           height: '100%',
@@ -674,86 +611,15 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     }
   };
 
-  const handleParentTouchStart = (e: TouchEvent | React.TouchEvent) => {
-    console.log('[Touch Parent] touchstart event detected');
-    const touch = 'touches' in e ? e.touches[0] : (e as any).changedTouches[0];
-    if (!touch) return;
-    touchStartXRef.current = touch.clientX;
-    touchStartYRef.current = touch.clientY;
-  };
-
-  const handleParentTouchEnd = (e: TouchEvent | React.TouchEvent) => {
-    console.log('[Touch Parent] touchend event detected');
-    const touch = 'changedTouches' in e ? e.changedTouches[0] : (e as any).touches[0];
-    if (!touch) return;
-    const diffX = touch.clientX - touchStartXRef.current;
-    const diffY = touch.clientY - touchStartYRef.current;
-
-    console.log(`[Touch Parent] touchend coordinates diffX=${Math.round(diffX)} diffY=${Math.round(diffY)}`);
-
-    // Ignorer si le geste provient d'une interface
-    const target = e.target as HTMLElement;
-    if (
-      target.closest('.reader-settings-menu') || 
-      target.closest('.reader-header') || 
-      target.closest('.reader-footer')
-    ) {
-      console.log('[Touch Parent] Gestures on UI element, ignored');
-      return;
-    }
-
-    // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
-    if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80) {
-      if (diffX < 0) {
-        console.log('[Touch Parent] Swipe horizontal left, turning page next');
-        handleNextPage();
-      } else {
-        console.log('[Touch Parent] Swipe horizontal right, turning page prev');
-        handlePrevPage();
-      }
-      return;
-    }
-    
-    // Tap de secours (mouvement < 15px) - UNIQUEMENT si l'événement provient de l'iframe directement
-    // et que l'overlay n'a pas pu l'intercepter. Pour les overlays, onClick suffit.
-    if (Math.abs(diffX) < 15 && Math.abs(diffY) < 15) {
-      if (target.closest('.mobile-touch-zone')) {
-        console.log('[Touch Parent] Tap on overlay, letting onClick handle it');
-        return;
-      }
-
-      if (Date.now() - lastTapTimeRef.current < 500) return;
-      lastTapTimeRef.current = Date.now();
-      
-      const container = containerRef.current;
-      if (!container) return;
-      
-      const width = container.clientWidth;
-      const clickX = touch.clientX - container.getBoundingClientRect().left;
-
-      if (clickX < width * 0.25) {
-        console.log('[Touch Parent] Tap left 25% (secours), turning page prev');
-        handlePrevPage();
-      } else if (clickX > width * 0.75) {
-        console.log('[Touch Parent] Tap right 25% (secours), turning page next');
-        handleNextPage();
-      }
-    }
-  };
-
   // Listeners de secours sur le conteneur parent (epub-container) pour les clics et touchers bloqués ou capturés par epub.js
   useEffect(() => {
     const container = containerRef.current;
     if (!container || isLoading) return;
 
     container.addEventListener('click', handleParentClick);
-    container.addEventListener('touchstart', handleParentTouchStart as any, { passive: true });
-    container.addEventListener('touchend', handleParentTouchEnd as any, { passive: true });
 
     return () => {
       container.removeEventListener('click', handleParentClick);
-      container.removeEventListener('touchstart', handleParentTouchStart as any);
-      container.removeEventListener('touchend', handleParentTouchEnd as any);
     };
   }, [isLoading]);
 
@@ -913,8 +779,6 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
                   handlePrevPage();
                 }
               }}
-              onTouchStart={handleParentTouchStart}
-              onTouchEnd={handleParentTouchEnd}
               style={{
                 position: 'absolute',
                 left: 0,
@@ -942,8 +806,6 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
                   handleNextPage();
                 }
               }}
-              onTouchStart={handleParentTouchStart}
-              onTouchEnd={handleParentTouchEnd}
               style={{
                 position: 'absolute',
                 right: 0,
