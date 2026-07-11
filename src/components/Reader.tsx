@@ -316,8 +316,12 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       };
 
       const handleClick = (e: MouseEvent) => {
+        console.log('[Touch Iframe] Click event detected inside iframe');
         const selection = contents.window?.getSelection() || contents.document?.getSelection();
-        if (selection && selection.toString().trim().length > 0) return; // Ne pas tourner si sélection de mot
+        if (selection && selection.toString().trim().length > 0) {
+          console.log('[Touch Iframe] Text selection detected, ignore page turn');
+          return;
+        }
         
         // Bloquer l'événement s'il a déjà été traité par un événement tactile touchend
         if (Date.now() - lastTapTime < 500) return;
@@ -326,13 +330,16 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const clickX = e.clientX;
         
         if (clickX < width * 0.25) {
+          console.log('[Touch Iframe] Click left 25%, turning page prev');
           handlePrevPage();
         } else if (clickX > width * 0.75) {
+          console.log('[Touch Iframe] Click right 25%, turning page next');
           handleNextPage();
         }
       };
 
       const handleTouchStart = (e: TouchEvent) => {
+        console.log('[Touch Iframe] touchstart event detected');
         const touch = e.changedTouches?.[0] || e.touches?.[0];
         if (!touch) return;
 
@@ -342,6 +349,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       };
 
       const handleTouchEnd = (e: TouchEvent) => {
+        console.log('[Touch Iframe] touchend event detected');
         const touch = e.changedTouches?.[0] || e.touches?.[0];
         if (!touch) return;
 
@@ -352,13 +360,17 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const diffX = touchEndX - touchStartX;
         const diffY = touchEndY - touchStartY;
         const timeDiff = touchEndTime - touchStartTime;
+
+        console.log(`[Touch Iframe] touchend coordinates diffX=${Math.round(diffX)} diffY=${Math.round(diffY)} timeDiff=${timeDiff}ms`);
         
         // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
         if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80 && timeDiff < 400) {
           if (diffX < 0) {
-            handleNextPage(); // swipe gauche -> suivant
+            console.log('[Touch Iframe] Swipe horizontal left, turning page next');
+            handleNextPage();
           } else {
-            handlePrevPage(); // swipe droite -> précédent
+            console.log('[Touch Iframe] Swipe horizontal right, turning page prev');
+            handlePrevPage();
           }
           return;
         }
@@ -370,8 +382,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           const clickX = touch.clientX;
           
           if (clickX < width * 0.25) {
+            console.log('[Touch Iframe] Tap left 25%, turning page prev');
             handlePrevPage();
           } else if (clickX > width * 0.75) {
+            console.log('[Touch Iframe] Tap right 25%, turning page next');
             handleNextPage();
           }
         }
@@ -635,6 +649,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     let lastTapTime = 0;
 
     const handleParentClick = (e: MouseEvent) => {
+      console.log('[Touch Parent] Click event detected on parent container');
       // Ignorer si le clic provient d'une interface de réglages, en-tête, barre basse ou d'un bouton
       const target = e.target as HTMLElement;
       if (
@@ -646,6 +661,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         target.closest('.btn-toc') ||
         target.closest('.btn-close-sidebar')
       ) {
+        console.log('[Touch Parent] Click on UI element, ignored');
         return;
       }
       
@@ -653,22 +669,28 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       const clickX = e.clientX - container.getBoundingClientRect().left;
 
       if (clickX < width * 0.25) {
+        console.log('[Touch Parent] Click left 25%, turning page prev');
         handlePrevPage();
       } else if (clickX > width * 0.75) {
+        console.log('[Touch Parent] Click right 25%, turning page next');
         handleNextPage();
       }
     };
 
     const handleParentTouchStart = (e: TouchEvent) => {
+      console.log('[Touch Parent] touchstart event detected');
       const touch = e.touches[0];
       touchStartX = touch.clientX;
       touchStartY = touch.clientY;
     };
 
     const handleParentTouchEnd = (e: TouchEvent) => {
+      console.log('[Touch Parent] touchend event detected');
       const touch = e.changedTouches[0];
       const diffX = touch.clientX - touchStartX;
       const diffY = touch.clientY - touchStartY;
+
+      console.log(`[Touch Parent] touchend coordinates diffX=${Math.round(diffX)} diffY=${Math.round(diffY)}`);
 
       // Ignorer si le geste provient d'une interface
       const target = e.target as HTMLElement;
@@ -677,15 +699,18 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         target.closest('.reader-header') || 
         target.closest('.reader-footer')
       ) {
+        console.log('[Touch Parent] Gestures on UI element, ignored');
         return;
       }
 
       // Swipe horizontal (seuil : 30px de distance, Y peu décalé)
       if (Math.abs(diffX) > 30 && Math.abs(diffY) < 80) {
         if (diffX < 0) {
-          handleNextPage(); // swipe gauche -> suivant
+          console.log('[Touch Parent] Swipe horizontal left, turning page next');
+          handleNextPage();
         } else {
-          handlePrevPage(); // swipe droite -> précédent
+          console.log('[Touch Parent] Swipe horizontal right, turning page prev');
+          handlePrevPage();
         }
         return;
       }
@@ -699,8 +724,10 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const clickX = touch.clientX - container.getBoundingClientRect().left;
 
         if (clickX < width * 0.25) {
+          console.log('[Touch Parent] Tap left 25%, turning page prev');
           handlePrevPage();
         } else if (clickX > width * 0.75) {
+          console.log('[Touch Parent] Tap right 25%, turning page next');
           handleNextPage();
         }
       }
@@ -846,7 +873,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       )}
 
       {/* Rendu EPUB */}
-      <div className="reader-viewport">
+      <div className="reader-viewport" style={{ position: 'relative' }}>
         {isLoading && (
           <div className="reader-loader">
             <BookOpen size={48} className="spin icon" />
@@ -854,6 +881,66 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           </div>
         )}
         <div ref={containerRef} className="epub-container" onClick={() => setShowSettingsMenu(false)}></div>
+
+        {/* Zones tactiles de clic/swipe de secours natives React (gauche 20%, droite 20%) */}
+        {!isLoading && (
+          <>
+            <div 
+              className="mobile-touch-zone prev" 
+              onClick={(e) => {
+                e.stopPropagation();
+                if (showSettingsMenu) {
+                  console.log('[Touch Overlay] Tapped left overlay while settings open, close settings');
+                  setShowSettingsMenu(false);
+                } else if (showToc) {
+                  console.log('[Touch Overlay] Tapped left overlay while sidebar open, close sidebar');
+                  setShowToc(false);
+                } else {
+                  console.log('[Touch Overlay] Prev page clicked');
+                  handlePrevPage();
+                }
+              }}
+              style={{
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                width: '20%',
+                height: '100%',
+                zIndex: 150,
+                cursor: 'pointer',
+                background: 'transparent'
+              }}
+              aria-label="Page précédente"
+            />
+            <div 
+              className="mobile-touch-zone next" 
+              onClick={(e) => {
+                e.stopPropagation();
+                if (showSettingsMenu) {
+                  console.log('[Touch Overlay] Tapped right overlay while settings open, close settings');
+                  setShowSettingsMenu(false);
+                } else if (showToc) {
+                  console.log('[Touch Overlay] Tapped right overlay while sidebar open, close sidebar');
+                  setShowToc(false);
+                } else {
+                  console.log('[Touch Overlay] Next page clicked');
+                  handleNextPage();
+                }
+              }}
+              style={{
+                position: 'absolute',
+                right: 0,
+                top: 0,
+                width: '20%',
+                height: '100%',
+                zIndex: 150,
+                cursor: 'pointer',
+                background: 'transparent'
+              }}
+              aria-label="Page suivante"
+            />
+          </>
+        )}
       </div>
 
       {/* Contrôles latéraux pour tablettes / ordinateurs */}
