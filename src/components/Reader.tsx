@@ -481,6 +481,13 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       containerRef.current.style.paddingLeft = '0px';
       containerRef.current.style.paddingRight = '0px';
       containerRef.current.style.boxSizing = 'border-box';
+      
+      // Forcer le recalcul du layout pour appliquer les marges injectées dans le CSS de l'iframe
+      try {
+        rendition.resize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+      } catch (e) {
+        console.warn('[Reader Styles] Impossible de redimensionner la rendition', e);
+      }
     }
   };
 
