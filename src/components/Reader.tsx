@@ -71,6 +71,19 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   });
 
   const isSavedRef = useRef(false);
+  const themeRef = useRef(theme);
+  const fontFamilyRef = useRef(fontFamily);
+  const fontSizeRef = useRef(fontSize);
+  const lineHeightRef = useRef(lineHeight);
+  const marginRef = useRef(margin);
+
+  useEffect(() => {
+    themeRef.current = theme;
+    fontFamilyRef.current = fontFamily;
+    fontSizeRef.current = fontSize;
+    lineHeightRef.current = lineHeight;
+    marginRef.current = margin;
+  }, [theme, fontFamily, fontSize, lineHeight, margin]);
 
   // Définition des thèmes graphiques pour l'iframe epub.js
   const themeStyles = {
@@ -164,7 +177,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         height: '100%',
         flow: 'paginated', // paginé classique
         allowScriptedContent: false,
-        spread: columns === '1' ? 'none' : (columns === '2' ? 'always' : 'auto')
+        spread: columns === '1' ? 'none' : (columns === '2' ? 'always' : 'auto'),
+        minSpreadWidth: columns === '2' ? 0 : 800
       });
       renditionRef.current = rendition;
 
@@ -308,6 +322,47 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     rendition.hooks.content.register((contents: any) => {
       let lastTapTime = 0;
 
+      // Injecter la feuille de style personnalisée dynamique pour écraser les styles internes de l'EPUB
+      const doc = contents.document;
+      if (doc) {
+        let styleEl = doc.getElementById('minireader-custom-styles');
+        if (!styleEl) {
+          styleEl = doc.createElement('style');
+          styleEl.id = 'minireader-custom-styles';
+          doc.head.appendChild(styleEl);
+        }
+        
+        const activeTheme = themeStyles[themeRef.current as keyof typeof themeStyles] || themeStyles.sepia;
+        styleEl.textContent = `
+          body {
+            background-color: ${activeTheme.bg} !important;
+            color: ${activeTheme.text} !important;
+            font-family: ${fontFamilyRef.current} !important;
+            font-size: ${fontSizeRef.current}% !important;
+            line-height: ${lineHeightRef.current} !important;
+            padding: 0 ${marginRef.current}px !important;
+            margin: 0 !important;
+            text-align: justify !important;
+          }
+          p, span, div, li, h1, h2, h3, h4, h5, h6, td, th {
+            font-family: ${fontFamilyRef.current} !important;
+            color: ${activeTheme.text} !important;
+          }
+          p, span, div, li {
+            font-size: inherit !important;
+            line-height: inherit !important;
+          }
+          p {
+            margin-bottom: 1em !important;
+            text-indent: 1.5em !important;
+          }
+          a {
+            color: ${activeTheme.text} !important;
+            text-decoration: underline !important;
+          }
+        `;
+      }
+
       const handleKeydown = (e: KeyboardEvent) => {
         if (e.key === 'ArrowRight') handleNextPage();
         if (e.key === 'ArrowLeft') handlePrevPage();
@@ -371,30 +426,55 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     const activeTheme = themeStyles[theme as keyof typeof themeStyles] || themeStyles.sepia;
 
-    // Définir la feuille de style par défaut de l'iframe
-    rendition.themes.default({
-      body: {
-        'background-color': `${activeTheme.bg} !important`,
-        'color': `${activeTheme.text} !important`,
-        'font-family': `${fontFamily} !important`,
-        'font-size': `${fontSize}% !important`,
-        'line-height': `${lineHeight} !important`,
-        'padding': `0 ${margin}px !important`, // Rétablir le padding natif de l'iframe
-        'text-align': 'justify !important',
-      },
-      p: {
-        'margin-bottom': '1em !important',
-        'text-indent': '1.5em !important',
-      },
-      a: {
-        'color': `${activeTheme.text} !important`,
-        'text-decoration': 'underline !important',
+    // Construire le CSS à appliquer dynamiquement
+    const customCSS = `
+      body {
+        background-color: ${activeTheme.bg} !important;
+        color: ${activeTheme.text} !important;
+        font-family: ${fontFamily} !important;
+        font-size: ${fontSize}% !important;
+        line-height: ${lineHeight} !important;
+        padding: 0 ${margin}px !important;
+        margin: 0 !important;
+        text-align: justify !important;
       }
-    });
+      p, span, div, li, h1, h2, h3, h4, h5, h6, td, th {
+        font-family: ${fontFamily} !important;
+        color: ${activeTheme.text} !important;
+      }
+      p, span, div, li {
+        font-size: inherit !important;
+        line-height: inherit !important;
+      }
+      p {
+        margin-bottom: 1em !important;
+        text-indent: 1.5em !important;
+      }
+      a {
+        color: ${activeTheme.text} !important;
+        text-decoration: underline !important;
+      }
+    `;
 
-    rendition.themes.select('default');
-    
-    // Mettre à jour la couleur d'arrière-plan du container parent
+    // Injecter ou mettre à jour la balise style dans toutes les sections d'iframe chargées
+    try {
+      rendition.views().forEach((view: any) => {
+        if (view.contents && view.contents.document) {
+          const doc = view.contents.document;
+          let styleEl = doc.getElementById('minireader-custom-styles');
+          if (!styleEl) {
+            styleEl = doc.createElement('style');
+            styleEl.id = 'minireader-custom-styles';
+            doc.head.appendChild(styleEl);
+          }
+          styleEl.textContent = customCSS;
+        }
+      });
+    } catch (e) {
+      console.warn('[Reader Styles] Impossible de mettre à jour le style des vues actives', e);
+    }
+
+    // Mettre à jour l'arrière-plan du container parent
     if (containerRef.current) {
       containerRef.current.style.backgroundColor = activeTheme.bg;
       containerRef.current.style.width = '100%';
@@ -490,7 +570,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           height: '100%',
           flow: 'paginated',
           allowScriptedContent: false,
-          spread: val === '1' ? 'none' : (val === '2' ? 'always' : 'auto')
+          spread: val === '1' ? 'none' : (val === '2' ? 'always' : 'auto'),
+          minSpreadWidth: val === '2' ? 0 : 800
         });
         
         renditionRef.current = rendition;
