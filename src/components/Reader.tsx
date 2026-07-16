@@ -456,9 +456,20 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       }
     `;
 
-    // Injecter ou mettre à jour la balise style dans toutes les sections d'iframe chargées
     try {
-      rendition.views().forEach((view: any) => {
+      const viewsManager = rendition.views as any;
+      let views: any[] = [];
+      if (viewsManager) {
+        if (typeof viewsManager.all === 'function') {
+          views = viewsManager.all();
+        } else if (typeof viewsManager === 'function') {
+          views = viewsManager();
+        } else if (Array.isArray(viewsManager._views)) {
+          views = viewsManager._views;
+        }
+      }
+      
+      views.forEach((view: any) => {
         if (view.contents && view.contents.document) {
           const doc = view.contents.document;
           let styleEl = doc.getElementById('minireader-custom-styles');
