@@ -739,7 +739,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
       {/* Menu Options de police & thèmes */}
       {showSettingsMenu && (
-        <div className="reader-settings-menu glass animate-fade-in">
+        <div className="reader-settings-menu glass animate-fade-in" onClick={(e) => e.stopPropagation()}>
           <div className="settings-menu-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '8px' }}>
             <span style={{ fontWeight: 600, fontSize: '14px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-secondary)' }}>Options d'affichage</span>
             <button 
