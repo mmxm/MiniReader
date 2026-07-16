@@ -457,17 +457,8 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
     `;
 
     try {
-      const viewsManager = rendition.views as any;
-      let views: any[] = [];
-      if (viewsManager) {
-        if (typeof viewsManager.all === 'function') {
-          views = viewsManager.all();
-        } else if (typeof viewsManager === 'function') {
-          views = viewsManager();
-        } else if (Array.isArray(viewsManager._views)) {
-          views = viewsManager._views;
-        }
-      }
+      const viewsObj = typeof rendition.views === 'function' ? rendition.views() : (rendition.views as any);
+      const views = (viewsObj && typeof viewsObj.all === 'function') ? viewsObj.all() : (Array.isArray(viewsObj) ? viewsObj : []);
       
       views.forEach((view: any) => {
         if (view.contents && view.contents.document) {
