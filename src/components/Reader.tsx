@@ -55,7 +55,12 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
         const syncUrl = localStorage.getItem('bookorbit_sync_url');
         if (syncUrl && navigator.onLine) {
           try {
-            const remoteState = await koboSyncApi.fetchReadingState(syncUrl, bookId);
+            const remoteState = await Promise.race([
+              koboSyncApi.fetchReadingState(syncUrl, bookId),
+              new Promise<any>((_, reject) =>
+                setTimeout(() => reject(new Error('Timeout de synchronisation distante')), 1200)
+              )
+            ]);
             if (remoteState && remoteState.CurrentBookmark) {
               const remoteBookmark = remoteState.CurrentBookmark;
               const remotePercent = remoteBookmark.ProgressPercent ?? 0;
