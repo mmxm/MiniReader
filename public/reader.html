@@ -24,6 +24,34 @@
           };
         }
       });
+
+      // Capturer les erreurs de chargement de ressources (scripts, styles) et de runtime
+      window.addEventListener('error', function(e) {
+        var target = e.target;
+        if (target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
+          window.parent.postMessage({
+            type: 'iframe-log',
+            level: 'error',
+            message: 'Échec de chargement de ressource : ' + (target.src || target.href)
+          }, '*');
+        } else {
+          window.parent.postMessage({
+            type: 'iframe-log',
+            level: 'error',
+            message: 'Erreur d\'exécution : ' + e.message + ' dans ' + e.filename + ':' + e.lineno
+          }, '*');
+        }
+      }, true);
+
+      // Capturer les rejets de promesses non gérés
+      window.addEventListener('unhandledrejection', function(e) {
+        var reason = e.reason;
+        window.parent.postMessage({
+          type: 'iframe-log',
+          level: 'error',
+          message: 'Rejet de promesse non géré : ' + (reason && (reason.message || reason.stack) || String(reason))
+        }, '*');
+      });
     }
 
     // Intercepter et simuler les appels API Codexa en mode PWA pour éviter la saturation réseau
