@@ -38,7 +38,30 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
     setSyncUrl(savedUrl);
     setUseProxy(localStorage.getItem('bookorbit_use_proxy') === 'true');
     if (savedUrl) {
-      setStatus('success');
+      if (navigator.onLine) {
+        setStatus('testing');
+        koboSyncApi.initialize(savedUrl)
+          .then((data) => {
+            if (data && data.Resources) {
+              setStatus('success');
+            } else {
+              setStatus('error');
+              setErrorMessage('Réponse serveur incorrecte.');
+            }
+          })
+          .catch((err) => {
+            setStatus('error');
+            if (err.message && err.message.includes('401')) {
+              setErrorMessage('Jeton de périphérique expiré ou invalide (Erreur 401).');
+            } else {
+              setErrorMessage(err.message || 'Impossible de joindre le serveur.');
+            }
+          });
+      } else {
+        setStatus('success');
+      }
+    } else {
+      setStatus('idle');
     }
     loadStorageStats();
   }, []);
