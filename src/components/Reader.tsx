@@ -18,6 +18,12 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   const isSavedRef = useRef(false);
 
   useEffect(() => {
+    if (!isLoading) {
+      console.log("[Reader PWA] [Parent] isLoading est passé à false. L'élément <iframe> va être injecté.");
+    }
+  }, [isLoading]);
+
+  useEffect(() => {
     console.log(`[Reader PWA] Montage du lecteur pour le livre ID: ${bookId}`);
     
     // 1. Initialiser le jeton pour passer la sécurité de Codexa
@@ -252,6 +258,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
           src={`/reader.html?id=${bookId}`}
           style={{ border: 'none', width: '100%', height: '100%' }}
           title="Lecteur d'ebook Codexa"
+          onLoad={() => console.log("[Reader PWA] [Parent] onLoad natif de l'IFrame déclenché !")}
         />
       )}
     </div>

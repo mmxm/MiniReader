@@ -54,6 +54,14 @@
       });
     }
 
+    console.log('[IFrame] Balise <script> inline de reader.html en cours d\'exécution.');
+    console.log('[IFrame] URL actuelle de l\'iframe :', window.location.href);
+    console.log('[IFrame] parent.window est accessible :', (window !== window.parent));
+    if (window !== window.parent) {
+      console.log('[IFrame] parent._epubArrayBuffer existe :', !!window.parent._epubArrayBuffer);
+      console.log('[IFrame] parent._bookMetadata existe :', !!window.parent._bookMetadata);
+    }
+
     // Intercepter et simuler les appels API Codexa en mode PWA pour éviter la saturation réseau
     if (window !== window.parent) {
       const originalFetch = window.fetch;
