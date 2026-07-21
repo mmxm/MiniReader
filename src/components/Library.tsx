@@ -362,12 +362,96 @@ export const Library: React.FC<LibraryProps> = ({
             }
           }
 
-          // Ajouter la collection aux livres listés
-          for (const bid of bookEntitlementIds) {
-            const b = await db.books.get(bid);
-            if (b) {
-              const nextCols = Array.from(new Set([...(b.collections || []), collectionName]));
-              await db.books.update(bid, { collections: nextCols });
+          // Ajouter la collection aux livres listés (et charger les métadonnées s'ils manquent)
+          const syncUrl = localStorage.getItem('bookorbit_sync_url');
+          if (syncUrl) {
+            try {
+              const config = parseSyncUrl(syncUrl);
+              for (const bid of bookEntitlementIds) {
+                let b = await db.books.get(bid);
+                if (!b && navigator.onLine) {
+                  try {
+                    console.log(`[Library Sync] Livre manquant détecté dans la collection : ${bid}. Récupération automatique de ses métadonnées...`);
+                    const targetUrl = getRequestUrl(`${config.baseUrl}/v1/library/${bid}/metadata`);
+                    const response = await fetch(targetUrl, {
+                      method: 'GET',
+                      headers: {
+                        'Accept': 'application/json',
+                        'User-Agent': 'Kobo eReader'
+                      }
+                    });
+                    if (response.ok) {
+                      const data = await response.json();
+                      const metadataList = Array.isArray(data) ? data : [data];
+                      if (metadataList.length > 0 && metadataList[0].Title) {
+                        const metadata = metadataList[0];
+                        const title = metadata.Title || 'Sans titre';
+                        
+                        const getAuthors = (meta: any): string[] => {
+                          if (!meta) return ['Auteur inconnu'];
+                          const fields = ['Contributors', 'contributors', 'Authors', 'authors', 'Author', 'author'];
+                          for (const f of fields) {
+                            const val = meta[f];
+                            if (!val) continue;
+                            if (Array.isArray(val)) {
+                              const resolved = val.map((item: any) => {
+                                if (typeof item === 'string') return item.trim();
+                                if (item && typeof item === 'object') {
+                                  return (item.Name || item.name || item.DisplayName || item.displayName || '').trim();
+                                }
+                                return '';
+                              }).filter(n => n.length > 0);
+                              if (resolved.length > 0) return resolved;
+                            }
+                            if (typeof val === 'string' && val.trim().length > 0) {
+                              return [val.trim()];
+                            }
+                          }
+                          return ['Auteur inconnu'];
+                        };
+                        
+                        const authors = getAuthors(metadata);
+                        const description = metadata.Description || null;
+                        const publisher = metadata.Publisher?.Name || null;
+                        const publishedDate = metadata.PublicationDate || null;
+                        
+                        const coverImageId = metadata.CoverImageId || bid;
+                        const coverUrl = `${config.baseUrl}/v1/books/${coverImageId}/thumbnail/300/400/false/image.jpg`;
+                        
+                        const newBook = {
+                          id: bid,
+                          title,
+                          authors,
+                          description,
+                          publisher,
+                          publishedDate,
+                          fileFormat: 'epub',
+                          fileSizeBytes: null,
+                          fileHash: null,
+                          coverUrl,
+                          downloaded: false,
+                          addedAt: new Date().toISOString(),
+                          updatedAt: new Date().toISOString(),
+                          collections: [collectionName]
+                        };
+                        
+                        await db.books.put(newBook);
+                        console.log(`[Library Sync] Livre manquant importé avec succès : "${title}" (${bid})`);
+                        b = newBook as any;
+                      }
+                    }
+                  } catch (metaErr) {
+                    console.error(`[Library Sync] Impossible de charger les métadonnées pour ${bid} :`, metaErr);
+                  }
+                }
+                
+                if (b) {
+                  const nextCols = Array.from(new Set([...(b.collections || []), collectionName]));
+                  await db.books.update(bid, { collections: nextCols });
+                }
+              }
+            } catch (configErr) {
+              console.error('[Library Sync] Erreur configuration lors du traitement des tags :', configErr);
             }
           }
         }
