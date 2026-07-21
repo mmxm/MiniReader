@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="sl" data-i18n-doc-title="reader.loading_book">
+<head>
+  <meta charset="UTF-8" />
+  <script>
+    // Intercepter et simuler les appels API Codexa en mode PWA pour éviter la saturation réseau
+    if (window !== window.parent) {
+      const originalFetch = window.fetch;
+      window.fetch = function(url, options) {
+        const urlStr = String(url);
+        if (urlStr.includes('/api/')) {
+          const isArrayResponse = urlStr.includes('/bookmarks') || urlStr.includes('/annotations');
+          return Promise.resolve(new Response(isArrayResponse ? '[]' : '{}', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          }));
+        }
+        return originalFetch.apply(this, arguments);
+      };
+    }
+  </script>
+  <!-- Chrome 83 WebView (inkPalmPlus/zxh_wv_te): when any SW controls the page,
+       return-without-respondWith for same-origin fetch() causes the response to hang
+       forever — regardless of file size. Ensure no SW is active before the page runs. -->
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      if (!/Chrome\/8[0-3].*\bwv\b/.test(navigator.userAgent)) return;
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        if (!regs.length) return;
+        console.warn('[reader] clearing SW for Chrome 83 (' + regs.length + ')...');
+        return Promise.all(regs.map(function (r) { return r.unregister(); })).then(function () {
+          console.warn('[reader] SW cleared, reloading...');
+          location.reload();
+        });
+      }).catch(function (e) {
+        console.warn('[reader] SW clear error:', e && e.message);
+      });
+    })();
+  </script>
+  <script>
+    document.documentElement.style.visibility = 'hidden';
+    // Apply stored theme colours immediately so the loading overlay is never invisible.
+    // Without this the default --color-bg (#1a1a2e) makes the overlay look solid black
+    // on e-ink displays before JS applies the real theme.
+    try {
+      var _p = JSON.parse(localStorage.getItem('br_reader_prefs') || '{}');
+      var _bg = '#1a1a2e', _fg = '#9a9ab0';
+      if (_p.eink)                           { _bg = '#f5f5f5'; _fg = '#444'; }
+      else if (_p.theme === 'light')         { _bg = '#f0f2f8'; _fg = '#555577'; }
+      else if (_p.theme === 'sepia')         { _bg = '#f5efe0'; _fg = '#7a6a50'; }
+      else if (_p.theme === 'nord')          { _bg = '#2e3440'; _fg = '#9a9ab0'; }
+      else if (_p.theme === 'midnight')      { _bg = '#0d0d0d'; _fg = '#888'; }
+      else if (_p.theme === 'custom' && _p.customBg) { _bg = _p.customBg; _fg = _p.customText || '#aaa'; }
+      document.documentElement.style.setProperty('--color-bg', _bg);
+      document.documentElement.style.setProperty('--color-text-muted', _fg);
+    } catch (_e) {}
+  </script>
+  <script>
+    /* Detect missing flexbox `gap` (Chrome < 84) and flag <html> so the margin
+       fallbacks in reader.css restore spacing between settings rows, header
+       buttons, tab icons, etc. No reliable CSS feature query exists for it. */
+    (function () {
+      try {
+        var f = document.createElement('div');
+        f.style.cssText = 'display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden';
+        f.appendChild(document.createElement('div'));
+        f.appendChild(document.createElement('div'));
+        document.documentElement.appendChild(f);
+        var ok = f.scrollHeight === 1;
+        document.documentElement.removeChild(f);
+        if (!ok) document.documentElement.className += ' no-flexgap';
+      } catch (e) {}
+    })();
+  </script>
+  <!-- iOS 26 PWA: env(safe-area-inset-*) returns 0px at load time in standalone mode.
+       100svh also reports wrong height (793px vs true 852px innerHeight on iPhone 16).
+       Probe real values via DOM + window.innerHeight and re-apply after PWA chrome settles. -->
+  <script>
+    (function () {
+      function probeEnv(css) {
+        var el = document.createElement('div');
+        el.style.cssText = 'position:fixed;pointer-events:none;opacity:0;top:0;left:0;width:1px;height:' + css + ';';
+        document.documentElement.appendChild(el);
+        var h = el.getBoundingClientRect().height;
+        el.remove();
+        return h;
+      }
+
+      function applyInsets(isFinal) {
+        var sat = probeEnv('env(safe-area-inset-top,0px)');
+        var sab = probeEnv('env(safe-area-inset-bottom,0px)');
+
+        // PWA detection: iOS uses navigator.standalone, Android uses display-mode media query
+        var isPwa = window.navigator.standalone === true ||
+                    window.matchMedia('(display-mode: standalone)').matches ||
+                    window.matchMedia('(display-mode: fullscreen)').matches;
+
+        // SAB fallback: iOS 26 PWA returns 0 until chrome settles.
+        // Only apply 34px hardcoded on final probe, only on iOS PWA with home indicator.
+        // Android reports SAB correctly, so don't override it there.
+        var isIos = /iP(hone|ad|od)/.test(navigator.userAgent);
+        if (sab === 0 && isPwa && isIos && isFinal) sab = 34;
+
+        // --layout-h: window.innerHeight gives true full-screen height in PWA.
+        // On Android PWA innerHeight is already correct from the start.
+        // On iOS PWA 100svh is too short (excludes status bar area).
+        // On regular browser: don't override — let CSS 100svh handle it.
+        var r = document.documentElement;
+        r.style.setProperty('--sat', sat + 'px');
+        // Always set --sab: corrects the CSS default (34px) for devices that don't need it
+        r.style.setProperty('--sab', sab + 'px');
+        if (isPwa) r.style.setProperty('--layout-h', window.innerHeight + 'px');
+        return { sat: sat, sab: sab, isPwa: isPwa };
+      }
+
+      // First probe — correct immediately on Android PWA and desktop
+      applyInsets(false);
+
+      // Second probe after iOS PWA chrome has settled (~500ms)
+      window.addEventListener('DOMContentLoaded', function () {
+        setTimeout(function () {
+          applyInsets(false);
+          // Final probe at 1s — last chance for iOS SAB to resolve
+          setTimeout(function () { applyInsets(true); }, 500);
+        }, 500);
+      });
+
+      // Re-probe on orientation change / resize
+      window.addEventListener('resize', function () {
+        setTimeout(function () { applyInsets(true); }, 200);
+      });
+
+      // Expose globally so reader JS can re-probe after Android immersive mode activates
+      window.__applyInsets = applyInsets;
+    })();
+  </script>
+  <!-- <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1, user-scalable=no" /> -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32x32.png" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#1a1a2e" />
+  <link rel="stylesheet" href="/css/main.css" />
+  <link rel="stylesheet" href="/css/reader.css" />
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div id="loading-overlay">
+    <span class="spinner"></span>
+    <span id="loading-msg" data-i18n="reader.loading_book">Nalagam knjigo…</span>
+  </div>
+
+  <!-- Safe-area fill: solid strip that sits behind the translucent header in PWA mode -->
+  <div id="safe-area-fill"></div>
+
+  <!-- Reader layout -->
+  <div class="reader-layout">
+
+    <!-- Sensor zone: shows the header when mouse enters top edge (auto-hide mode) -->
+    <div id="header-sensor"></div>
+
+    <!-- Header -->
+    <header class="reader-header">
+      <button id="btn-back"        class="btn-icon" data-i18n-title="reader.btn_back"       title="Nazaj v knjižnico"><img src="/images/back.svg" class="nav-icon nav-icon-back" alt=""></button>
+      <button id="btn-toc"             class="btn-icon" data-i18n-title="reader.btn_toc"           title="Kazalo vsebine"><img src="/images/chapters.svg" class="nav-icon nav-icon-chapters" alt=""></button>
+      <button id="btn-bookmarks"       class="btn-icon bookmark-btn-wrap" data-i18n-title="reader.btn_bookmarks" title="Zaznamki"><img src="/images/bookmark.svg" class="nav-icon nav-icon-bookmark" alt=""><span id="bookmarks-badge" class="bookmark-badge hidden"></span></button>
+      <button id="btn-annotations"     class="btn-icon bookmark-btn-wrap" data-i18n-title="reader.btn_annotations" title="Označbe"><img src="/images/highlight.svg" class="nav-icon nav-icon-highlight" alt=""><span id="annotations-badge" class="bookmark-badge hidden"></span></button>
+      <button id="btn-bookmark-back"   class="btn-icon" style="display:none" data-i18n-title="reader.btn_search_back"   title="Nazaj na prejšnji položaj">↩</button>
+      <button id="btn-bookmark-accept"    class="btn-icon" style="display:none" data-i18n-title="reader.btn_search_accept" title="Sprejmi položaj">✓</button>
+      <button id="btn-annotation-back"   class="btn-icon" style="display:none" data-i18n-title="reader.btn_search_back"   title="Nazaj na prejšnji položaj">↩</button>
+      <button id="btn-annotation-accept" class="btn-icon" style="display:none" data-i18n-title="reader.btn_search_accept" title="Sprejmi položaj">✓</button>
+ 
+      <div class="reader-book-info">
+        <div id="book-title"    class="reader-book-title"></div>
+        <div id="chapter-title" class="reader-chapter-title"></div>
+      </div>
+ 
+      <button id="btn-search"        class="btn-icon" data-i18n-title="reader.btn_search"        title="Iskanje v knjigi"><img src="/images/find.svg" class="nav-icon nav-icon-find" alt=""></button>
+      <button id="btn-search-back"   class="btn-icon" style="display:none" data-i18n-title="reader.btn_search_back"   title="Nazaj na prejšnji položaj">↩</button>
+      <button id="btn-search-accept" class="btn-icon" style="display:none" data-i18n-title="reader.btn_search_accept" title="Sprejmi položaj">✓</button>
+      <button id="btn-jump-pct"      class="btn-icon" data-i18n-title="reader.btn_jump_pct"      title="Skoči na odstotek"><img src="/images/percentage.svg" class="nav-icon nav-icon-percentage" alt=""></button>
+      <button id="btn-sync"         class="btn-icon" data-i18n-title="reader.btn_sync"         title="Sync progress"><img src="/images/sync.svg" class="nav-icon nav-icon-sync" alt=""></button>
+      <button id="btn-sleep-timer"  class="btn-icon" data-i18n-title="reader.btn_sleep_timer"  title="Sleep timer"><img src="/images/time.svg" class="nav-icon nav-icon-time" alt=""><span id="sleep-timer-badge" class="sleep-timer-badge hidden"></span></button>
+      <button id="btn-settings"      class="btn-icon" data-i18n-title="reader.btn_settings"      title="Nastavitve branja"><img src="/images/settings.svg" class="nav-icon nav-icon-settings" alt=""></button>
+      <button id="btn-fullscreen"  class="btn-icon" data-i18n-title="reader.btn_fullscreen" title="Celozaslonski način"><img src="/images/fullscreen.svg" class="nav-icon nav-icon-fullscreen" alt=""></button>
+    </header>
+
+    <!-- Tap outside to dismiss jump-to-% panel (iframe clicks never reach the host document) -->
+    <div id="jump-pct-backdrop" class="jump-pct-backdrop" hidden></div>
+
+    <!-- Jump-to-percentage panel -->
+    <div id="jump-pct-panel" style="display:none">
+      <button id="btn-prev-chap" class="sb-chap-nav-btn" data-i18n-title="reader.prev_chapter" title="Prejšnje poglavje">‹</button>
+      <div class="jump-pct-row">
+        <div class="jump-pct-track-wrap">
+          <input type="range" id="jump-pct-slider" min="0" max="100" step="1" value="0" />
+          <div id="sb-chap-markers"></div>
+        </div>
+        <input type="text" inputmode="numeric" id="jump-pct-value" class="jump-pct-value-input setting-value" value="0" maxlength="3" data-i18n-aria-label="reader.jump_pct_input" aria-label="Jump to percentage" />
+      </div>
+      <button id="btn-next-chap" class="sb-chap-nav-btn" data-i18n-title="reader.next_chapter" title="Naslednje poglavje">›</button>
+    </div>
+
+    <!-- Floating navigation button (one-handed nav) -->
+    <div id="float-nav-btn" class="float-nav-btn" style="display:none"></div>
+
+    <!-- Sleep timer backdrop -->
+    <div id="sleep-timer-backdrop" class="sleep-timer-backdrop"></div>
+
+    <!-- Sleep timer panel -->
+    <div id="sleep-timer-panel" class="sleep-timer-panel">
+      <div id="sleep-timer-remaining" class="sleep-timer-remaining" style="display:none"></div>
+      <div class="sleep-timer-presets">
+        <button class="sleep-preset-btn" data-minutes="5">5m</button>
+        <button class="sleep-preset-btn" data-minutes="10">10m</button>
+        <button class="sleep-preset-btn" data-minutes="15">15m</button>
+        <button class="sleep-preset-btn" data-minutes="30">30m</button>
+        <button class="sleep-preset-btn" data-minutes="45">45m</button>
+        <button class="sleep-preset-btn" data-minutes="60">60m</button>
+      </div>
+      <div class="sleep-timer-actions">
+        <label class="sleep-action-label"><input type="radio" name="sleep-action" value="dim" checked> <span data-i18n="reader.sleep_action_dim">Zatemni zaslon</span></label>
+        <label class="sleep-action-label"><input type="radio" name="sleep-action" value="close"> <span data-i18n="reader.sleep_action_close">Zapri knjigo</span></label>
+        <label class="sleep-action-label"><input type="radio" name="sleep-action" value="wake"> <span data-i18n="reader.sleep_action_wake">Izklopi zaslon vedno vklopljen</span></label>
+      </div>
+      <button id="sleep-timer-cancel-btn" class="btn btn-secondary sleep-timer-cancel-btn" style="display:none" data-i18n="reader.sleep_timer_cancel">Prekliči časovnik</button>
+    </div>
+
+    <!-- Dim overlay — shown when sleep timer fires with "dim" action -->
+    <div id="sleep-dim-overlay" class="sleep-dim-overlay" style="display:none"></div>
+
+    <!-- Reading area -->
+    <div class="reader-main">
+      <div class="nav-zone nav-zone-prev" aria-hidden="true">
+        <div class="nav-arrow" id="btn-prev" role="button" data-i18n-aria-label="reader.prev_page" aria-label="Prejšnja stran" tabindex="0">‹</div>
+      </div>
+
+      <div id="epub-viewer"></div>
+
+      <div class="nav-zone nav-zone-next" aria-hidden="true">
+        <div class="nav-arrow" id="btn-next" role="button" data-i18n-aria-label="reader.next_page" aria-label="Naslednja stran" tabindex="0">›</div>
+      </div>
+
+      <!-- Page edge shadow overlay (book-spine border effect) -->
+      <div id="page-edge-shadow"></div>
+
+      <!-- Status bar overlays -->
+      <div id="sb-top"    class="sb-bar sb-bar-top">
+        <span id="sb-tl" class="sb-slot"></span>
+        <span id="sb-tc" class="sb-slot"></span>
+        <span id="sb-tr" class="sb-slot"></span>
+      </div>
+      <div id="sb-sep-top"    class="sb-separator sb-sep-top"    style="display:none"></div>
+      <div id="sb-sep-bottom" class="sb-separator sb-sep-bottom" style="display:none"></div>
+      <div id="sb-bottom" class="sb-bar sb-bar-bottom">
+        <span id="sb-bl" class="sb-slot"></span>
+        <span id="sb-bc" class="sb-slot"></span>
+        <span id="sb-br" class="sb-slot"></span>
+      </div>
+      <!-- KOSync tap hot zones (bottom corners) -->
+      <div id="kosync-zone-bl" class="kosync-hotzone kosync-hotzone-bl" aria-hidden="true"></div>
+      <div id="kosync-zone-br" class="kosync-hotzone kosync-hotzone-br" aria-hidden="true"></div>
+
+      <!-- Chapter progress bar (overlaid on reading area) -->
+      <div id="sb-chap-prog" class="sb-prog-bar" style="display:none">
+        <div id="sb-chap-prog-fill" class="sb-prog-fill"></div>
+      </div>
+      <!-- Book progress bar (overlaid on reading area) -->
+      <div id="sb-book-prog" class="sb-prog-bar" style="display:none">
+        <div id="sb-book-prog-fill" class="sb-prog-fill"></div>
+      </div>
+    </div>
+
+    <!-- Bottom progress bar -->
+    <div class="reader-progressbar">
+      <div id="progress-fill" class="reader-progressbar-fill" style="width:0%"></div>
+    </div>
+
+  </div><!-- /.reader-layout -->
+
+  <!-- TOC sidebar -->
+  <aside id="toc-sidebar" aria-label="Kazalo vsebine">
+    <div class="toc-sidebar-header">
+      <div class="panel-title">
+        <img src="/images/chapters.svg" class="nav-icon nav-icon-chapters dialog-title-icon" alt="">
+        <h2 data-i18n="reader.toc_title">Kazalo vsebine</h2>
+      </div>
+      <button id="toc-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri kazalo">×</button>
+    </div>
+    <div id="toc-list"></div>
+  </aside>
+
+  <!-- Annotations sidebar -->
+  <aside id="annotations-sidebar" aria-label="Označbe">
+    <div class="annotations-sidebar-header">
+      <div class="panel-title">
+        <img src="/images/highlight.svg" class="nav-icon nav-icon-highlight dialog-title-icon" alt="">
+        <h2 data-i18n="reader.annotations_title">Označbe</h2>
+      </div>
+      <button id="annotations-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri označbe">×</button>
+    </div>
+    <div id="annotations-list"></div>
+  </aside>
+
+  <!-- Bookmarks sidebar -->
+  <aside id="bookmarks-sidebar" aria-label="Zaznamki">
+    <div class="bookmarks-sidebar-header">
+      <div class="panel-title">
+        <img src="/images/bookmark.svg" class="nav-icon nav-icon-bookmark dialog-title-icon" alt="">
+        <h2 data-i18n="reader.bookmarks_title">Zaznamki</h2>
+      </div>
+      <button id="btn-add-bookmark" class="btn-icon-sm" data-i18n-title="reader.btn_add_bookmark" title="Dodaj zaznamek">+</button>
+      <button id="bookmarks-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri zaznamke">×</button>
+    </div>
+    <div id="bookmarks-list"></div>
+  </aside>
+
+  <!-- Search sidebar -->
+  <aside id="search-sidebar" aria-label="Iskanje v knjigi">
+    <div class="search-sidebar-header">
+      <div class="panel-title">
+        <img src="/images/find.svg" class="nav-icon nav-icon-find dialog-title-icon" alt="">
+        <h2 data-i18n="reader.search_title">Iskanje</h2>
+      </div>
+      <button id="search-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri iskanje">×</button>
+    </div>
+    <div class="search-input-row">
+      <input type="search" id="search-input" data-i18n-placeholder="reader.search_placeholder" placeholder="Iščite v knjigi…" autocomplete="off" />
+      <button id="search-submit" class="btn-primary" data-i18n="reader.search_btn">Išči</button>
+    </div>
+    <div id="search-status" class="search-status"></div>
+    <div id="search-results" class="search-results"></div>
+  </aside>
+
+  <!-- Settings panel -->
+  <div id="settings-panel" role="complementary" aria-label="Nastavitve branja">
+    <div class="settings-panel-header">
+      <div class="settings-panel-header-row">
+        <div class="panel-title">
+          <img src="/images/settings.svg" class="nav-icon nav-icon-settings dialog-title-icon" alt="">
+          <h2 data-i18n="reader.settings_title">Nastavitve branja</h2>
+        </div>
+        <button id="settings-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri nastavitve">×</button>
+      </div>
+      <button id="btn-reset-book-prefs" class="btn btn-secondary btn-sm hidden settings-reset-btn" data-i18n-title="reader.btn_reset_book" title="Odstrani nastavitve specifične za to knjigo in uporabi globalne privzete" data-i18n="reader.btn_reset_book">Ponastavi za to knjigo</button>
+    </div>
+
+    <!-- Tab navigation bar -->
+    <div class="settings-tabs-bar" role="tablist">
+      <button class="settings-tab-btn" data-tab="theme" role="tab">
+        <span class="settings-tab-icon">🎨</span>
+        <span class="settings-tab-label" data-i18n="reader.settings_tab_theme">Tema</span>
+      </button>
+      <button class="settings-tab-btn" data-tab="text" role="tab">
+        <span class="settings-tab-icon">Aa</span>
+        <span class="settings-tab-label" data-i18n="reader.settings_tab_text">Besedilo</span>
+      </button>
+      <button class="settings-tab-btn" data-tab="layout" role="tab">
+        <span class="settings-tab-icon">📐</span>
+        <span class="settings-tab-label" data-i18n="reader.settings_tab_layout">Stran</span>
+      </button>
+      <button class="settings-tab-btn" data-tab="device" role="tab">
+        <span class="settings-tab-icon">📱</span>
+        <span class="settings-tab-label" data-i18n="reader.settings_tab_device">Naprava</span>
+      </button>
+      <button class="settings-tab-btn" data-tab="statusbar" role="tab">
+        <span class="settings-tab-icon">☰</span>
+        <span class="settings-tab-label" data-i18n="reader.settings_tab_statusbar">Vrstica</span>
+      </button>
+      <button class="settings-tab-btn" data-tab="dicts" role="tab">
+        <span class="settings-tab-icon">📖</span>
+        <span class="settings-tab-label" data-i18n="reader.settings_tab_dicts">Slovarji</span>
+      </button>
+    </div>
+
+    <div class="settings-body">
+
+      <!-- TAB: Theme -->
+      <div class="settings-tab-pane" data-tab="theme">
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.sb_theme">Tema</div>
+          <div class="theme-buttons">
+            <div class="theme-buttons-row">
+              <button class="theme-btn theme-light" data-theme="light" data-i18n="reader.theme_light">Svetla</button>
+              <button class="theme-btn theme-sepia" data-theme="sepia" data-i18n="reader.theme_sepia">Sepija</button>
+              <button class="theme-btn theme-dark"  data-theme="dark"  data-i18n="reader.theme_dark">Temna</button>
+            </div>
+            <div class="theme-buttons-row">
+              <button class="theme-btn theme-sepiaDark" data-theme="sepiaDark" data-i18n="reader.theme_sepia_dark">Sepija temna</button>
+              <button class="theme-btn theme-midnight"  data-theme="midnight"  data-i18n="reader.theme_midnight">Polnoč</button>
+              <button class="theme-btn theme-nord"      data-theme="nord"      data-i18n="reader.theme_nord">Nord</button>
+            </div>
+            <div class="theme-buttons-row">
+              <button class="theme-btn theme-custom" data-theme="custom" data-i18n="reader.theme_custom">Po meri</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom color pickers (shown only when Custom theme is active) -->
+        <div class="setting-row" id="custom-color-pickers" style="display:none">
+          <div class="setting-label" data-i18n="reader.custom_colors">Custom colors</div>
+          <div class="custom-color-pickers">
+            <label class="custom-color-picker">
+              <span data-i18n="reader.custom_bg">Background</span>
+              <input type="color" id="custom-bg-color" value="#000000" />
+            </label>
+            <label class="custom-color-picker">
+              <span data-i18n="reader.custom_text">Text</span>
+              <input type="color" id="custom-text-color" value="#c8b89a" />
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Override book styles -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_override_styles">Prepiši slog knjige</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_override_styles_hint">
+                Vsili pisavo in barve ne glede na slog knjige
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="override-styles-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- E-ink mode -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_eink">E-ink način</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_eink_hint">
+                Samo črno-belo za e-ink naprave (obarva temo in vsebino)
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="eink-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Page gap shadow -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_page_shadow">Rob strani (senca knjige)</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_page_shadow_hint">
+                Temni rob med stranema v načinu dveh strani
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="page-gap-shadow-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Header button visibility -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.header_btns_title">Gumbi v glavi bralnika</div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_annotations">Označbe</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-annotations-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_search">Iskanje</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-search-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_percentage">Odstotek</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-percentage-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_sync">Sinhronizacija</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-sync-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_sleep_timer">Časovnik</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-sleep-timer-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_fullscreen">Celozaslonski</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-fullscreen-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_bookmark_badge">Bookmark count badge</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-bookmark-badge-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.header_btn_annotation_badge">Highlight count badge</div>
+            <label class="toggle"><input type="checkbox" id="header-btn-annotation-badge-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Page turn animation -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.page_turn_anim">Animacija obračanja strani</div>
+          <div class="spread-buttons page-anim-grid">
+            <button class="spread-btn page-anim-btn" data-anim="none"     data-i18n="reader.page_turn_none">Nič</button>
+            <button class="spread-btn page-anim-btn" data-anim="fade"     data-i18n="reader.page_turn_fade">Zaton</button>
+            <button class="spread-btn page-anim-btn" data-anim="slide"    data-i18n="reader.page_turn_slide">Drsenje</button>
+            <button class="spread-btn page-anim-btn" data-anim="paper"    data-i18n="reader.page_turn_paper">Papir</button>
+            <button class="spread-btn page-anim-btn" data-anim="momentum" data-i18n="reader.page_turn_momentum">Zamah</button>
+            <button class="spread-btn page-anim-btn" data-anim="zoom"     data-i18n="reader.page_turn_zoom">Povečava</button>
+          </div>
+        </div>
+
+        <!-- Finger tracking (drag) for Paper / Momentum -->
+        <div class="setting-row" id="page-turn-drag-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.page_turn_drag">Sledenje s prstom</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.page_turn_drag_hint">
+                Vlecite strani s prstom (Papir in Zamah)
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="page-turn-drag-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div><!-- /.settings-tab-pane[theme] -->
+
+      <!-- TAB: Text -->
+      <div class="settings-tab-pane" data-tab="text">
+        <!-- Font preview -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.font_preview_label">Predogled pisave</div>
+          <div id="font-preview-box" class="font-preview-box"></div>
+        </div>
+        <!-- Font family -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.sb_font">Pisava</div>
+          <div class="font-picker-wrap" id="font-family-picker">
+            <button type="button" class="font-picker-btn" aria-haspopup="listbox" aria-expanded="false">
+              <span class="font-picker-label"></span>
+              <span class="font-picker-caret">▾</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Font size -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_font_size">Velikost pisave</div>
+            <span id="font-size-value" class="setting-value">18px</span>
+          </div>
+          <input type="range" id="font-size-slider" min="12" max="36" step="1" value="18" />
+        </div>
+
+        <!-- Line height -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_line_height">Razmik med vrsticami</div>
+            <span id="line-height-value" class="setting-value">1.6</span>
+          </div>
+          <input type="range" id="line-height-slider" min="1.0" max="3.0" step="0.1" value="1.6" />
+        </div>
+
+        <!-- Letter spacing -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_letter_spacing">Razmik med črkami</div>
+            <span id="letter-spacing-value" class="setting-value">0px</span>
+          </div>
+          <input type="range" id="letter-spacing-slider" min="0" max="10" step="0.5" value="0" />
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Paragraph indentation -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_para_indent">Zamik prvega odstavka</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_para_indent_hint">
+                Zamakne prvo vrstico vsakega odstavka
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="para-indent-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Paragraph indent size (only visible when paraIndent is on) -->
+        <div class="setting-row" id="para-indent-size-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_para_indent_size">Velikost zamika odstavka</div>
+            <span id="para-indent-size-value" class="setting-value">1.5em</span>
+          </div>
+          <input type="range" id="para-indent-size-slider" min="5" max="40" step="1" value="15" />
+        </div>
+
+        <!-- Paragraph spacing -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_para_spacing">Razmik med odstavki</div>
+            <span id="para-spacing-value" class="setting-value">0.0em</span>
+          </div>
+          <input type="range" id="para-spacing-slider" min="0" max="30" step="1" value="0" />
+        </div>
+
+        <!-- Chapter heading spacing -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_chap_head_spacing">Zmanjšaj razmake naslovov poglavij</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_chap_head_spacing_hint">
+                Prepiše razmike iz knjige za naslove poglavij
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="chap-head-spacing-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_compact_blank_lines">Skrij prazne vrstice</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_compact_blank_lines_hint">
+                Skrije prazne odstavke, ki jih knjiga uporablja za razmik
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="compact-blank-lines-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Disable text justification -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_disable_justify">Poravnava levo (brez justifikacije)</div>
+            <label class="toggle">
+              <input type="checkbox" id="disable-justify-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Hyphenation -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_hyphenation">Deljenje besed</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_hyphenation_hint">
+                Samodejno deljenje besed na koncu vrstice
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="hyphenation-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="setting-row" id="hyphen-lang-row">
+          <div class="setting-label" style="font-size:.8rem" data-i18n="reader.sb_hyphenation_lang">Jezik deljenja</div>
+          <div class="sort-menu-wrap" style="margin-top:.25rem;min-width:0">
+            <select id="hyphen-lang-select" class="sort-select hidden" aria-hidden="true" tabindex="-1">
+              <option value="" data-i18n="reader.sb_hyphenation_lang_auto">Samodejno (iz knjige)</option>
+              <option value="sl">Slovenščina (sl)</option>
+              <option value="en">English (en)</option>
+              <option value="de">Deutsch (de)</option>
+              <option value="fr">Français (fr)</option>
+              <option value="it">Italiano (it)</option>
+              <option value="es">Español (es)</option>
+              <option value="pt">Português (pt)</option>
+              <option value="nl">Nederlands (nl)</option>
+              <option value="pl">Polski (pl)</option>
+              <option value="cs">Čeština (cs)</option>
+              <option value="hr">Hrvatski (hr)</option>
+              <option value="sk">Slovenčina (sk)</option>
+              <option value="ru">Русский (ru)</option>
+              <option value="uk">Українська (uk)</option>
+            </select>
+            <button type="button" id="hyphen-lang-menu-btn" class="sort-menu-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="hyphen-lang-menu-list">
+              <span id="hyphen-lang-menu-label"></span>
+              <span class="sort-menu-caret">▾</span>
+            </button>
+            <div id="hyphen-lang-menu-list" class="sort-menu-list hidden" role="listbox"></div>
+          </div>
+        </div>
+
+        <!-- Bionic reading -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_bionic">Bionično branje</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_bionic_hint">
+                Poudari začetek besed za hitrejše branje; sprememba znova naloži knjigo na istem položaju.
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="bionic-reading-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div><!-- /.settings-tab-pane[text] -->
+
+      <!-- TAB: Page Layout -->
+      <div class="settings-tab-pane" data-tab="layout">
+        <!-- Page layout -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.sb_layout">Postavitev strani</div>
+          <div class="spread-buttons">
+            <button class="spread-btn" data-spread="none" data-i18n="reader.spread_one">Ena stran</button>
+            <button class="spread-btn" data-spread="auto" data-i18n="reader.spread_two">Dve strani</button>
+          </div>
+        </div>
+
+        <!-- Margins -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_margins">Robovi</div>
+            <span id="margin-value" class="setting-value">40px</span>
+          </div>
+          <input type="range" id="margin-slider" min="0" max="120" step="4" value="40" />
+        </div>
+
+        <!-- Auto-hide header -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_autohide">Samodejno skrij naslovno vrstico</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_autohide_hint">
+                Premaknite miško na vrh, da jo prikažete
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="autohide-header-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Page navigation zones -->
+        <div class="setting-section-title" data-i18n="reader.sb_section_navigation">Page navigation</div>
+        <div style="font-size:.76rem;color:var(--color-text-muted);margin-bottom:.5rem" data-i18n="reader.sb_nav_zone_hint">Tap or click this portion of the screen to turn pages.</div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_nav_zone_left">Back zone (left edge)</div>
+            <span id="nav-zone-left-value" class="setting-value">20%</span>
+          </div>
+          <input type="range" id="nav-zone-left-slider" min="0" max="40" step="1" value="20" />
+        </div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_nav_zone_right">Forward zone (right edge)</div>
+            <span id="nav-zone-right-value" class="setting-value">20%</span>
+          </div>
+          <input type="range" id="nav-zone-right-slider" min="0" max="40" step="1" value="20" />
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- One-handed navigation -->
+        <div class="setting-section-title" data-i18n="reader.sb_section_one_hand">Enoročna navigacija</div>
+
+        <!-- Floating nav button -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.float_nav_btn">Lebdeči gumb</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.float_nav_btn_hint">Dotik = naprej, dolg pritisk = nazaj. Povleci za premestitev.</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="float-nav-btn-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row" id="float-nav-btn-opacity-row" style="display:none">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.float_nav_btn_opacity">Vidnost gumba</div>
+            <span id="float-nav-btn-opacity-value" class="setting-value">70%</span>
+          </div>
+          <input type="range" id="float-nav-btn-opacity-slider" min="10" max="100" step="5" value="70" />
+        </div>
+
+        <!-- Vertical tap zones -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.vert_nav_zones">Navpična cona dotika</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.vert_nav_zones_hint">Zgornja = nazaj, spodnja = naprej</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="vert-nav-zones-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div class="setting-row" id="vert-nav-zones-reverse-row" style="display:none">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.vert_nav_zones_reverse">Obrni (zgoraj = naprej)</div>
+            <label class="toggle"><input type="checkbox" id="vert-nav-zones-reverse-toggle"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Toolbar button size -->
+        <div class="setting-section-title" data-i18n="reader.sb_section_toolbar">Toolbar</div>
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_header_button_size">Toolbar button size</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_header_button_hint">Percentage of the default button size (100% = normal)</div>
+            </div>
+            <span id="header-button-size-value" class="setting-value">100%</span>
+          </div>
+          <input type="range" id="header-button-size-slider" min="75" max="225" step="5" value="100" />
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Edge padding (curved phone screen insets) -->
+        <div class="setting-section-title" data-i18n="reader.sb_section_edge_pad">Odmik robov strani</div>
+        <div class="setting-row">
+          <div style="font-size:.76rem;color:var(--color-text-muted);margin-bottom:.4rem" data-i18n="reader.sb_edge_pad_hint">Za zaobljene robove zaslona (telefon) — premakne vsebino in statusno vrstico od roba.</div>
+          <div class="setting-row-inline" style="gap:.35rem;margin-bottom:.3rem">
+            <div class="setting-label" style="font-size:.8rem;width:3.5rem;flex-shrink:0" data-i18n="common.top">Zgoraj</div>
+            <span id="edge-pad-top-value" class="setting-value">0px</span>
+            <input type="range" id="edge-pad-top" min="0" max="60" step="1" value="0" style="flex:1" />
+          </div>
+          <div class="setting-row-inline" style="gap:.35rem;margin-bottom:.3rem">
+            <div class="setting-label" style="font-size:.8rem;width:3.5rem;flex-shrink:0" data-i18n="common.bottom">Spodaj</div>
+            <span id="edge-pad-bottom-value" class="setting-value">0px</span>
+            <input type="range" id="edge-pad-bottom" min="0" max="60" step="1" value="0" style="flex:1" />
+          </div>
+          <div class="setting-row-inline" style="gap:.35rem;margin-bottom:.3rem">
+            <div class="setting-label" style="font-size:.8rem;width:3.5rem;flex-shrink:0" data-i18n="common.left">Levo</div>
+            <span id="edge-pad-left-value" class="setting-value">0px</span>
+            <input type="range" id="edge-pad-left" min="0" max="60" step="1" value="0" style="flex:1" />
+          </div>
+          <div class="setting-row-inline" style="gap:.35rem">
+            <div class="setting-label" style="font-size:.8rem;width:3.5rem;flex-shrink:0" data-i18n="common.right">Desno</div>
+            <span id="edge-pad-right-value" class="setting-value">0px</span>
+            <input type="range" id="edge-pad-right" min="0" max="60" step="1" value="0" style="flex:1" />
+          </div>
+        </div>
+      </div><!-- /.settings-tab-pane[layout] -->
+
+      <!-- TAB: Device -->
+      <div class="settings-tab-pane" data-tab="device">
+        <!-- Keep screen on -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_screen_on">Zaslon vedno vklopljen</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_screen_on_hint">
+                Prepreči ugasnitev zaslona med branjem
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="keep-screen-on-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Mouse wheel navigation -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_mouse_wheel">Pomikanje z miško</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_mouse_wheel_hint">
+                Kolo miške pomika med stranmi
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="mouse-wheel-nav-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Mobile / PWA: portrait lock (hidden on desktop browsers) -->
+        <div id="portrait-lock-section" style="display:none">
+          <div class="setting-row">
+            <div class="setting-row-inline">
+              <div>
+                <div class="setting-label" data-i18n="reader.portrait_lock">Always portrait mode</div>
+                <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.portrait_lock_hint">
+                  Lock the reader to portrait orientation when you rotate the device
+                </div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="portrait-lock-toggle" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Native app (Android/iOS): volume key navigation (hidden in browser/PWA) -->
+        <div id="android-settings-section" style="display:none">
+          <div class="setting-row">
+            <div class="setting-row-inline">
+              <div>
+                <div class="setting-label" data-i18n="reader.android_volume_keys">Volume key navigation</div>
+                <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.android_volume_keys_hint">
+                  Use hardware volume keys to turn pages
+                </div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="volume-keys-toggle" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-inline">
+              <div>
+                <div class="setting-label" data-i18n="reader.android_volume_swap">Swap volume key direction</div>
+                <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.android_volume_swap_hint">
+                  Volume up goes forward, volume down goes back
+                </div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="volume-keys-swap-toggle" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="setting-row">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_skip_open">Ne preveri napredek ob odprtju knjige</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_skip_open_hint">
+                Če je vključeno, knjiga se vedno odpre na začetku brez preverjanja shranjenega/sinhroniziranega položaja
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="skip-open-progress-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_skip_close">Ne shrani ob zaprtju knjige</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_skip_close_hint">
+                Če je vključeno, ob vrnitvi v knjižnico ali zaprtju zavihka se položaj ne shrani samodejno
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="skip-save-on-close-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div><!-- /.settings-tab-pane[device] -->
+
+      <!-- TAB: Status Bar -->
+      <div class="settings-tab-pane" data-tab="statusbar">
+        <!-- Status bar font & style -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.sb_bar_font">Pisava vrstice</div>
+          <div class="setting-row-inline" style="gap:.4rem">
+            <div class="font-picker-wrap" id="sb-font-picker" style="flex:1;min-width:0">
+              <button type="button" class="font-picker-btn" aria-haspopup="listbox" aria-expanded="false">
+                <span class="font-picker-label"></span>
+                <span class="font-picker-caret">▾</span>
+              </button>
+            </div>
+            <button class="sb-style-btn" id="sb-style-normal" title="Navadno">A</button>
+            <button class="sb-style-btn" id="sb-style-bold"   title="Krepko"><strong>A</strong></button>
+            <button class="sb-style-btn" id="sb-style-italic" title="Poševno"><em>A</em></button>
+          </div>
+          <div class="setting-row-inline" style="margin-top:.35rem">
+            <div class="setting-label" style="font-size:.8rem" data-i18n="common.size">Velikost</div>
+            <span id="sb-font-size-value" class="setting-value">11px</span>
+            <input type="range" id="sb-font-size-slider" min="8" max="18" step="1" value="11" style="flex:1" />
+          </div>
+        </div>
+
+        <!-- Stat items -->
+        <div id="sb-items-list" class="sb-items-list">
+          <div style="font-size:.82rem;color:var(--color-text-muted)">Nalaganje&hellip;</div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Separator lines -->
+        <div class="setting-row">
+          <div class="setting-label" style="margin-bottom:.35rem" data-i18n="reader.sb_separator">Ločilna črta</div>
+          <div class="setting-row-inline" style="gap:.5rem">
+            <div style="flex:1">
+              <div style="font-size:.8rem;margin-bottom:.2rem" data-i18n="reader.sb_sep_top">Zgoraj (pod zgornjo vrstico)</div>
+              <label class="toggle">
+                <input type="checkbox" id="sb-sep-top-toggle" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div style="flex:1">
+              <div style="font-size:.8rem;margin-bottom:.2rem" data-i18n="reader.sb_sep_bottom">Spodaj (nad spodnjo vrstico)</div>
+              <label class="toggle">
+                <input type="checkbox" id="sb-sep-bottom-toggle" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-row-inline" id="sb-sep-thick-row" style="display:none;margin-top:.4rem">
+            <div class="setting-label" style="font-size:.8rem" data-i18n="reader.sb_sep_thickness">Debelina</div>
+            <span id="sb-sep-thick-value" class="setting-value">1px</span>
+            <input type="range" id="sb-sep-thick-slider" min="1" max="5" step="1" value="1" style="flex:1" />
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <!-- Book progress bar -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_book_prog">Napredek knjige (trak)</div>
+            <label class="toggle">
+              <input type="checkbox" id="sb-book-prog-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div id="sb-book-prog-opts" style="display:none;margin-top:.3rem">
+            <div class="setting-row-inline" style="flex-wrap:wrap;gap:.4rem">
+              <div class="setting-label" style="font-size:.8rem" data-i18n="common.position">Položaj</div>
+              <select id="sb-book-prog-pos">
+                <option value="top" data-i18n="common.top">Zgoraj</option>
+                <option value="bottom" data-i18n="common.bottom">Spodaj</option>
+              </select>
+              <div class="setting-label" style="font-size:.8rem;margin-left:.25rem" data-i18n="reader.sb_sep_thickness">Debelina</div>
+              <span id="sb-book-prog-thick-value" class="setting-value">3px</span>
+              <input type="range" id="sb-book-prog-thick-slider" min="1" max="10" step="1" value="3" style="flex:1;min-width:80px" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Chapter progress bar -->
+        <div class="setting-row">
+          <div class="setting-row-inline">
+            <div class="setting-label" data-i18n="reader.sb_chap_prog">Napredek poglavja (trak)</div>
+            <label class="toggle">
+              <input type="checkbox" id="sb-chap-prog-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div id="sb-chap-prog-opts" style="display:none;margin-top:.3rem">
+            <div class="setting-row-inline" style="flex-wrap:wrap;gap:.4rem">
+              <div class="setting-label" style="font-size:.8rem" data-i18n="common.position">Položaj</div>
+              <select id="sb-chap-prog-pos">
+                <option value="top" data-i18n="common.top">Zgoraj</option>
+                <option value="bottom" data-i18n="common.bottom">Spodaj</option>
+              </select>
+              <div class="setting-label" style="font-size:.8rem;margin-left:.25rem" data-i18n="reader.sb_sep_thickness">Debelina</div>
+              <span id="sb-chap-prog-thick-value" class="setting-value">2px</span>
+              <input type="range" id="sb-chap-prog-thick-slider" min="1" max="10" step="1" value="2" style="flex:1;min-width:80px" />
+            </div>
+          </div>
+        </div>
+        <div class="settings-divider"></div>
+
+        <!-- Clock format -->
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.sb_clock_format">Clock format</div>
+          <div class="spread-buttons" style="margin-top:.4rem">
+            <button id="sb-clock-24h" class="spread-btn active" data-i18n="reader.sb_clock_24h">24h</button>
+            <button id="sb-clock-12h" class="spread-btn"        data-i18n="reader.sb_clock_12h">12h (AM/PM)</button>
+          </div>
+        </div>
+      </div><!-- /.settings-tab-pane[statusbar] -->
+
+      <!-- TAB: Dictionaries -->
+      <div class="settings-tab-pane" data-tab="dicts">
+        <div class="setting-row">
+          <div class="setting-label" data-i18n="reader.sb_dicts">Slovarji</div>
+          <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.1rem;margin-bottom:.35rem" data-i18n="reader.sb_dicts_hint">
+            Izberite slovarje in nastavite vrstni red iskanja (&#8593;&#8595;)
+          </div>
+          <div id="dict-settings-list">
+            <div style="font-size:.82rem;color:var(--color-text-muted)">Nalaganje…</div>
+          </div>
+        </div>
+      </div><!-- /.settings-tab-pane[dicts] -->
+
+
+    </div><!-- /.settings-body -->
+  </div><!-- /#settings-panel -->
+
+  <!-- Footnote popup (slides up from bottom) -->
+  <div id="footnote-backdrop" class="footnote-backdrop"></div>
+  <div id="footnote-popup" role="dialog" aria-modal="false" aria-labelledby="footnote-popup-title">
+    <div class="footnote-popup-header">
+      <span id="footnote-popup-title" class="footnote-popup-label" data-i18n="footnote.popup_title">Opomba</span>
+      <button id="footnote-popup-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri">&#x2715;</button>
+    </div>
+    <div id="footnote-popup-content" class="footnote-popup-content"></div>
+  </div>
+
+  <!-- Annotation backdrop (shared by toolbar, note editor, edit sheet) -->
+  <div id="annot-backdrop" class="annot-backdrop"></div>
+
+  <!-- Annotation toolbar — slides up when text is selected -->
+  <div id="annot-toolbar" role="toolbar" aria-label="Označi besedilo">
+    <div class="annot-toolbar-colors">
+      <button class="annot-color-btn" data-color="yellow" data-i18n-title="reader.annotation_color_yellow" aria-label="Rumena"></button>
+      <button class="annot-color-btn" data-color="green"  data-i18n-title="reader.annotation_color_green"  aria-label="Zelena"></button>
+      <button class="annot-color-btn" data-color="blue"   data-i18n-title="reader.annotation_color_blue"   aria-label="Modra"></button>
+      <button class="annot-color-btn" data-color="pink"   data-i18n-title="reader.annotation_color_pink"   aria-label="Roza"></button>
+    </div>
+    <button id="annot-btn-note"        class="btn-icon-sm" data-i18n-title="reader.annotation_add_note"    title="Dodaj opombo"><img src="/images/add_note.svg"   class="nav-icon nav-icon-add-note"   alt=""></button>
+    <button id="annot-btn-dict"        class="btn-icon-sm annot-btn-dict" data-i18n-title="reader.annotation_dict_lookup" title="Slovar"><img src="/images/dictionary.svg" class="nav-icon nav-icon-dictionary" alt=""></button>
+    <button id="annot-btn-search-book" class="btn-icon-sm" data-i18n-title="reader.annotation_search_book"  title="Išči v knjigi"><img src="/images/find.svg"       class="nav-icon nav-icon-find"       alt=""></button>
+    <button id="annot-btn-copy"        class="btn-icon-sm" data-i18n-title="reader.annotation_copy"         title="Kopiraj"><img src="/images/copy.svg"       class="nav-icon nav-icon-copy"       alt=""></button>
+    <button id="annot-btn-cancel"      class="btn-icon-sm" data-i18n-aria-label="common.close" aria-label="Prekliči"><img src="/images/close.svg"       class="nav-icon nav-icon-close"      alt=""></button>
+  </div>
+
+  <!-- Annotation note editor — for writing/editing a note -->
+  <div id="annot-note-editor" role="dialog" aria-modal="true" aria-labelledby="annot-note-title">
+    <div class="annot-note-header">
+      <span id="annot-note-title" class="annot-note-label" data-i18n="reader.annotation_note_title">Opomba</span>
+      <button id="annot-note-cancel" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri">&#x2715;</button>
+    </div>
+    <div class="annot-note-colors">
+      <button class="annot-note-color-btn" data-color="yellow" data-i18n-title="reader.annotation_color_yellow" aria-label="Rumena"></button>
+      <button class="annot-note-color-btn" data-color="green"  data-i18n-title="reader.annotation_color_green"  aria-label="Zelena"></button>
+      <button class="annot-note-color-btn" data-color="blue"   data-i18n-title="reader.annotation_color_blue"   aria-label="Modra"></button>
+      <button class="annot-note-color-btn" data-color="pink"   data-i18n-title="reader.annotation_color_pink"   aria-label="Roza"></button>
+    </div>
+    <textarea id="annot-note-text" rows="4"
+      data-i18n-placeholder="reader.annotation_note_placeholder"
+      placeholder="Napiši opombo…" maxlength="1000"></textarea>
+    <div class="annot-note-footer">
+      <button id="annot-note-save" class="btn btn-primary" data-i18n="reader.annotation_note_save">Shrani</button>
+    </div>
+  </div>
+
+  <!-- Annotation edit sheet — shown when tapping an existing highlight -->
+  <div id="annot-edit-sheet" role="dialog" aria-modal="true" aria-label="Uredi označbo">
+    <div class="annot-edit-header">
+      <span class="annot-note-label" data-i18n="reader.annotation_edit_title">Označba</span>
+      <button id="annot-edit-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri">&#x2715;</button>
+    </div>
+    <div class="annot-edit-note-preview"></div>
+    <div class="annot-edit-colors">
+      <button class="annot-edit-color-btn" data-color="yellow" aria-label="Rumena"></button>
+      <button class="annot-edit-color-btn" data-color="green"  aria-label="Zelena"></button>
+      <button class="annot-edit-color-btn" data-color="blue"   aria-label="Modra"></button>
+      <button class="annot-edit-color-btn" data-color="pink"   aria-label="Roza"></button>
+    </div>
+    <div class="annot-edit-actions">
+      <button id="annot-edit-note-btn"   class="btn btn-secondary" data-i18n="reader.annotation_edit_note">Uredi opombo</button>
+      <button id="annot-edit-delete-btn" class="btn btn-danger"    data-i18n="reader.annotation_delete">Izbriši</button>
+    </div>
+  </div>
+
+  <!-- Backdrop -->
+  <div id="panel-backdrop"></div>
+
+  <!-- Dictionary popup (bottom sheet) -->
+  <div id="dict-popup" class="dict-popup" role="dialog" aria-modal="true" aria-label="Slovar" aria-hidden="true">
+    <div class="dict-popup-handle"></div>
+    <div class="dict-popup-header">
+      <span id="dict-popup-word" class="dict-popup-word-title"></span>
+      <button id="dict-popup-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri slovar">&#x2715;</button>
+    </div>
+    <div id="dict-popup-results" class="dict-popup-results"></div>
+  </div>
+  <div id="dict-backdrop" class="dict-backdrop"></div>
+
+  <!-- Tap outside to dismiss auto-hidden toolbar (on body — above iframe stacking) -->
+  <div id="header-dismiss-backdrop" class="header-dismiss-backdrop"></div>
+
+  <div id="toast-container"></div>
+
+  <!-- Apply auto-hide header class before module executes to prevent layout flash -->
+  <script>
+    try {
+      const _p = JSON.parse(localStorage.getItem('br_reader_prefs') || '{}');
+      if (_p.autoHideHeader) document.querySelector('.reader-layout').classList.add('autohide-header');
+    } catch {}
+  </script>
+
+  <!-- JSZip: used by CXReader to parse EPUB / CBZ archives.
+       Vendored same-origin (not loaded from CDN) so the service worker can precache it —
+       cross-origin requests are deliberately left uncached by sw.js, and third-party CDN
+       resources aren't reliably available offline in iOS home-screen PWAs. -->
+  <script src="/js/vendor/jszip.min.js"></script>
+  <script type="module" src="/js/reader.js?v=br-v102"></script>
+  <script src="/js/sw-register.js"></script>
+</body>
+</html>

@@ -1,0 +1,3396 @@
+/* ── Reset & variables ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --color-bg:          #1a1a2e;
+  --color-surface:     #16213e;
+  --color-surface2:    #0f3460;
+  --color-accent:      #e94560;
+  --color-accent-dark: #c73652;
+  --color-text:        #e0e0e0;
+  --color-text-muted:  #9a9ab0;
+  --color-border:      #2a2a4a;
+  --color-success:     #4caf50;
+  --color-danger:      #e94560;
+  --radius:            8px;
+  --radius-lg:         14px;
+  --shadow:            0 4px 24px rgba(0,0,0,.4);
+  --sidebar-width:     260px;
+  --header-height:     60px;
+  --transition:        .2s ease;
+  --sat:               var(--sat, env(safe-area-inset-top, 0px));
+  --sab:               var(--sab, env(safe-area-inset-bottom, 0px));
+  --sal:               var(--sal, env(safe-area-inset-left, 0px));
+  --sar:               var(--sar, env(safe-area-inset-right, 0px));
+}
+
+/* Light theme */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-bg:       #f0f2f8;
+    --color-surface:  #ffffff;
+    --color-surface2: #e4e8f4;
+    --color-text:     #1a1a2e;
+    --color-text-muted: #555577;
+    --color-border:   #d0d4e8;
+  }
+}
+
+/* Library pages only: explicit theme overrides (sidebar-layout pages) */
+html[data-lib-theme="day"],
+.sidebar-layout[data-lib-theme="day"] {
+  --color-bg:          #f0f2f8;
+  --color-surface:     #ffffff;
+  --color-surface2:    #e4e8f4;
+  --color-accent:      #c73652;
+  --color-accent-dark: #a82843;
+  --color-text:        #1a1a2e;
+  --color-text-muted:  #555577;
+  --color-border:      #d0d4e8;
+  --shadow:            0 4px 24px rgba(20,20,40,.12);
+}
+
+html[data-lib-theme="night"],
+.sidebar-layout[data-lib-theme="night"] {
+  --color-bg:          #1a1a2e;
+  --color-surface:     #16213e;
+  --color-surface2:    #0f3460;
+  --color-accent:      #e94560;
+  --color-accent-dark: #c73652;
+  --color-text:        #e0e0e0;
+  --color-text-muted:  #9a9ab0;
+  --color-border:      #2a2a4a;
+  --shadow:            0 4px 24px rgba(0,0,0,.4);
+}
+
+html[data-lib-theme="eink"],
+.sidebar-layout[data-lib-theme="eink"] {
+  --color-bg:          #ffffff;
+  --color-surface:     #ffffff;
+  --color-surface2:    #f3f3f3;
+  --color-accent:      #111111;
+  --color-accent-dark: #000000;
+  --color-danger:      #111111;
+  --color-text:        #111111;
+  --color-text-muted:  #575757;
+  --color-border:      #cccccc;
+  --shadow:            0 1px 0 rgba(0,0,0,.08);
+}
+
+
+/* E-ink: replace all hardcoded accent-tint colours with black/white */
+html[data-lib-theme="eink"] .sidebar-item-active,
+.sidebar-layout[data-lib-theme="eink"] .sidebar-item-active {
+  background: #111 !important;
+  color: #fff !important;
+}
+html[data-lib-theme="eink"] .sidebar-item-active .shelf-edit-btn,
+html[data-lib-theme="eink"] .sidebar-item-active .shelf-count,
+.sidebar-layout[data-lib-theme="eink"] .sidebar-item-active .shelf-edit-btn,
+.sidebar-layout[data-lib-theme="eink"] .sidebar-item-active .shelf-count {
+  color: #fff;
+}
+html[data-lib-theme="eink"] .sidebar-theme-btn.active,
+.sidebar-layout[data-lib-theme="eink"] .sidebar-theme-btn.active {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+html[data-lib-theme="eink"] .lang-menu-btn[aria-expanded="true"],
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-btn[aria-expanded="true"] {
+  box-shadow: none;
+  border-color: #111;
+}
+html[data-lib-theme="eink"] .lang-menu-option.active,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-option.active {
+  background: #111;
+  color: #fff;
+}
+html[data-lib-theme="eink"] .sort-menu-btn[aria-expanded="true"],
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-btn[aria-expanded="true"] {
+  box-shadow: none;
+  border-color: #111;
+}
+html[data-lib-theme="eink"] .sort-menu-option.active,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-option.active {
+  background: #111;
+  color: #fff;
+}
+html[data-lib-theme="eink"] .alert-error,
+html[data-lib-theme="eink"] .alert-success,
+.sidebar-layout[data-lib-theme="eink"] .alert-error,
+.sidebar-layout[data-lib-theme="eink"] .alert-success {
+  background: #f5f5f5;
+  color: #111;
+  border-color: #bbb;
+}
+html[data-lib-theme="eink"] .toast-success,
+html[data-lib-theme="eink"] .toast-error {
+  background: #111;
+  color: #fff;
+}
+html[data-lib-theme="eink"] .status-ok,
+html[data-lib-theme="eink"] .status-error,
+.sidebar-layout[data-lib-theme="eink"] .status-ok,
+.sidebar-layout[data-lib-theme="eink"] .status-error {
+  background: #e8e8e8;
+  color: #111;
+}
+html[data-lib-theme="eink"] .drop-zone.drag-over,
+.sidebar-layout[data-lib-theme="eink"] .drop-zone.drag-over {
+  background: #f0f0f0;
+}
+html[data-lib-theme="eink"] .series-filter-bar,
+.sidebar-layout[data-lib-theme="eink"] .series-filter-bar {
+  background: #f0f0f0;
+  border-color: #bbb;
+}
+
+html, body {
+  height: 100%;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+  scrollbar-gutter: stable;
+}
+
+a { color: var(--color-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+img { max-width: 100%; display: block; }
+
+/* ── Navigation SVG icons ──────────────────────────────────────────────────── */
+.nav-icon {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+  width: 1.1em;
+  height: 1.1em;
+  object-fit: contain;
+}
+h1 .nav-icon, .logo .nav-icon { width: 1.4rem; height: 1.4rem; }
+.nav-tile .nav-icon            { width: 2rem;   height: 2rem; }
+
+/* Dark theme: invert monochrome sidebar icons so they appear white */
+html[data-lib-theme="night"] .nav-icon-settings,
+html[data-lib-theme="night"] .nav-icon-logout,
+html[data-lib-theme="night"] .nav-icon-language,
+html[data-lib-theme="night"] .nav-icon-github,
+.sidebar-layout[data-lib-theme="night"] .nav-icon-settings,
+.sidebar-layout[data-lib-theme="night"] .nav-icon-logout,
+.sidebar-layout[data-lib-theme="night"] .nav-icon-language,
+.sidebar-layout[data-lib-theme="night"] .nav-icon-github { filter: brightness(0) invert(1); }
+@media (prefers-color-scheme: dark) {
+  /* Scoped to .app-sidebar so this never reaches the reader's own header icons
+     (the reader page has no data-lib-theme and colours its icons via the reader
+     theme's --nav-icon-filter; without this scope a dark-mode phone forced the
+     reader's Settings icon white). */
+  html:not([data-lib-theme]) .app-sidebar .nav-icon-settings,
+  html:not([data-lib-theme]) .app-sidebar .nav-icon-logout,
+  html:not([data-lib-theme]) .app-sidebar .nav-icon-language,
+  html:not([data-lib-theme]) .app-sidebar .nav-icon-github { filter: brightness(0) invert(1); }
+}
+
+/* E-ink theme: swap coloured icons for black-and-white variants */
+html[data-lib-theme="eink"] .nav-icon-codexa            { content: url('/images/codexa_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-all-library       { content: url('/images/all_library_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-currently-reading { content: url('/images/currently_reading_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-shelf             { content: url('/images/shelf_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-opds-shelf        { content: url('/images/opds_shelf_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-settings          { content: url('/images/settings_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-logout            { content: url('/images/logout_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-language          { content: url('/images/language_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-appearance        { content: url('/images/appearance_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-display-size      { content: url('/images/display_size_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-online-library    { content: url('/images/online_library_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-bookorbit         { content: url('/images/bookorbit_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-folder            { content: url('/images/folder_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-delete            { content: url('/images/delete_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-delete-offline    { content: url('/images/delete_offline_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-download          { content: url('/images/download_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-download-offline  { content: url('/images/download_offline_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-read              { content: url('/images/read_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-peek              { content: url('/images/peek_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-zoom              { content: url('/images/zoom_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-save              { content: url('/images/save_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-search            { content: url('/images/search_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-edit              { content: url('/images/edit_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-book-upload       { content: url('/images/book_upload_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-statistics        { content: url('/images/statistics_bw.svg'); }
+
+html[data-lib-theme="eink"] .book-cover,
+html[data-lib-theme="eink"] .stats-book-cover,
+html[data-lib-theme="eink"] .info-modal-cover,
+html[data-lib-theme="eink"] .cover-preview-img,
+html[data-lib-theme="eink"] .info-modal-kosync-result-cover,
+html[data-lib-theme="eink"] .imt-related-cover { filter: grayscale(100%); }
+html[data-lib-theme="eink"] .opds-welcome .icon,
+.sidebar-layout[data-lib-theme="eink"] .opds-welcome .icon { filter: grayscale(100%); }
+html[data-lib-theme="eink"] .book-offline-badge,
+.sidebar-layout[data-lib-theme="eink"] .book-offline-badge { background: #111; }
+html[data-lib-theme="eink"] .book-format-badge,
+.sidebar-layout[data-lib-theme="eink"] .book-format-badge { background: #111; color: #fff; }
+html[data-lib-theme="eink"] .book-status-badge,
+.sidebar-layout[data-lib-theme="eink"] .book-status-badge { background: #111; color: #fff; }
+html[data-lib-theme="eink"] .book-rating-filled,
+.sidebar-layout[data-lib-theme="eink"] .book-rating-filled { color: #111; }
+html[data-lib-theme="eink"] .book-rating-empty,
+.sidebar-layout[data-lib-theme="eink"] .book-rating-empty  { color: #888; }
+html[data-lib-theme="eink"] .imt-action-btn,
+.sidebar-layout[data-lib-theme="eink"] .imt-action-btn {
+  background: #fff;
+  border-color: #111;
+  box-shadow: none;
+}
+html[data-lib-theme="eink"] .imt-action-btn:hover,
+.sidebar-layout[data-lib-theme="eink"] .imt-action-btn:hover {
+  background: #f0f0f0;
+}
+html[data-lib-theme="eink"] #info-modal-reset-progress,
+.sidebar-layout[data-lib-theme="eink"] #info-modal-reset-progress {
+  background: #fff;
+  color: #111;
+  border-color: #111;
+  box-shadow: none;
+}
+
+/* ── Utility ────────────────────────────────────────────────────────────────── */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0);
+  white-space: nowrap; border: 0;
+}
+.hidden { display: none !important; }
+.flex   { display: flex; }
+.flex-wrap { flex-wrap: wrap; }
+.gap-1  { gap: .5rem; }
+.gap-2  { gap: 1rem; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .5rem 1.1rem;
+  border: none;
+  border-radius: var(--radius);
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition), opacity var(--transition);
+  white-space: nowrap;
+}
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary  { background: var(--color-accent); color: #fff; }
+.btn-primary:hover  { background: var(--color-accent-dark); }
+.btn-secondary { background: var(--color-surface2); color: var(--color-text); border: 1px solid var(--color-border); }
+.btn-secondary:hover { opacity: .85; }
+.btn-danger   { background: var(--color-danger); color: #fff; }
+.btn-danger:hover { opacity: .85; }
+.btn-read     { background: #2e7d32; color: #fff; }
+.btn-read:hover { opacity: .85; text-decoration: none; }
+.btn-sm { padding: .3rem .7rem; font-size: .8rem; }
+.btn-icon {
+  padding: .4rem;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.btn-icon:hover { color: var(--color-text); border-color: var(--color-text-muted); }
+
+/* ── Form elements ──────────────────────────────────────────────────────────── */
+.form-group { display: flex; flex-direction: column; gap: .4rem; }
+.form-group label { font-size: .85rem; color: var(--color-text-muted); font-weight: 600; }
+
+input[type="text"],
+input[type="password"],
+input[type="url"],
+input[type="email"],
+input[type="search"],
+select,
+textarea {
+  width: 100%;
+  padding: .55rem .85rem;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text);
+  font-size: .95rem;
+  transition: border-color var(--transition);
+  outline: none;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--color-accent);
+}
+
+/* Old Android WebViews paint a persistent orange focus ring on tapped buttons and
+   don't support :focus-visible, so the ring lingers after a tap (e.g. it stuck
+   around the selected theme button). Suppress the default ring and restore an
+   accessible one only for keyboard focus, where :focus-visible is supported. */
+button { -webkit-tap-highlight-color: transparent; }
+button:focus { outline: none; }
+button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* ── Card ───────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+}
+
+/* ── Alert / Toast ──────────────────────────────────────────────────────────── */
+.alert {
+  padding: .75rem 1rem;
+  border-radius: var(--radius);
+  font-size: .9rem;
+  margin-bottom: 1rem;
+}
+.alert-error   { background: rgba(233,69,96,.15); color: #ff6b8a; border: 1px solid rgba(233,69,96,.3); }
+.alert-success { background: rgba(76,175,80,.15);  color: #81c784; border: 1px solid rgba(76,175,80,.3); }
+
+#toast-container {
+  position: fixed;
+  bottom: calc(1.5rem + var(--sab, env(safe-area-inset-bottom, 0px)));
+  right: 1.5rem;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  pointer-events: none;
+}
+.toast {
+  padding: .75rem 1.2rem;
+  border-radius: var(--radius);
+  font-size: .9rem;
+  color: #fff;
+  box-shadow: var(--shadow);
+  animation: slideIn .25s ease;
+  pointer-events: auto;
+}
+.toast-success { background: #388e3c; }
+.toast-error   { background: #c62828; }
+.toast-warn    { background: #e65100; }
+.toast-info    { background: var(--color-surface2); color: var(--color-text); }
+.toast-progress {
+  background: var(--color-surface2);
+  color: var(--color-text);
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+.toast-progress-label   { font-size: .85rem; opacity: .8; }
+.toast-progress-counter { font-size: .85rem; text-align: right; opacity: .7; }
+.toast-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+.toast-progress-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--color-accent);
+  transition: width .2s ease;
+}
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+/* ── App layout ─────────────────────────────────────────────────────────────── */
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-header {
+  min-height: var(--header-height);
+  flex-shrink: 0;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.5rem;
+  padding-top: var(--sat, env(safe-area-inset-top, 0px));
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.app-header .logo {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.app-header .logo:hover,
+.sidebar-header .logo:hover,
+.app-body-header .logo:hover { text-decoration: none; }
+.app-header nav { display: flex; align-items: center; gap: .75rem; }
+
+.app-version {
+  font-size: .65em;
+  font-weight: 400;
+  opacity: .55;
+  vertical-align: middle;
+  margin-left: .2em;
+}
+.update-badge {
+  display: inline-block;
+  font-size: .6em;
+  font-weight: 600;
+  vertical-align: middle;
+  margin-left: .4em;
+  padding: .1em .45em;
+  border-radius: 999px;
+  background: #e07b00;
+  color: #fff;
+  text-decoration: none;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.update-badge:hover { background: #c96e00; text-decoration: none; }
+html[data-lib-theme="eink"] .update-badge { background: #333; color: #fff; }
+
+.offline-icon {
+  display: none;
+  width: 18px;
+  height: 18px;
+  margin-left: .4rem;
+  vertical-align: middle;
+  opacity: .85;
+}
+body.is-offline .offline-icon { display: inline-block; }
+body.is-offline .app-version { display: none; }
+html[data-lib-theme="eink"] .nav-icon-offline { content: url('/images/offline_bw.svg'); }
+body.is-offline #nav-settings,
+body.is-offline #nav-opds,
+body.is-offline #nav-bookorbit { opacity: 0.4; cursor: not-allowed; }
+body.is-offline .sidebar-shelf-item,
+body.is-offline #add-shelf-btn { opacity: 0.4; cursor: not-allowed; }
+body.is-offline #sidebar-stats-btn { opacity: 0.4; cursor: not-allowed; }
+body.is-offline #upload-btn,
+body.is-offline #edit-mode-btn { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+.sidebar-header .logo { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
+
+.app-main {
+  flex: 1;
+  padding: 2rem 1.5rem;
+  padding-bottom: calc(2rem + var(--sab, env(safe-area-inset-bottom, 0px)));
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+  /* Container so the toolbar can react to its OWN width (which is viewport minus the
+     sidebar, and is scaled by the Display-size zoom) rather than the raw viewport. */
+  container-type: inline-size;
+}
+
+/* When the content area gets narrow, drop the Add-book button's text label (keeping
+   the "+ ▾") so it packs onto the toolbar row instead of wrapping to a line of its own. */
+@container (max-width: 820px) {
+  .upload-btn-label { display: none; }
+}
+
+/* ── Page heading ───────────────────────────────────────────────────────────── */
+.page-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.page-header h1 { font-size: 1.5rem; }
+.library-toolbar-controls {
+  align-items: center;
+  margin-left: auto;
+}
+.library-toolbar-controls #search-input {
+  width: 180px;
+  min-width: 0;
+  padding-left: 2rem;
+}
+.search-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.search-wrap .search-icon {
+  position: absolute;
+  left: .5rem;
+  pointer-events: none;
+  opacity: .5;
+  width: 1em;
+  height: 1em;
+}
+
+/* ── OPDS-linked shelf banner ───────────────────────────────────────────────── */
+.opds-shelf-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .4rem .75rem;
+  padding: .5rem .75rem;
+  margin-bottom: 1rem;
+  background: var(--color-surface-alt, var(--color-bg-alt));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+.opds-shelf-banner.hidden { display: none; }
+.opds-shelf-sync-date {
+  flex: 1;
+  font-size: .8rem;
+  color: var(--color-text-muted);
+  min-width: 0;
+}
+.opds-shelf-banner-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+@media (max-width: 480px) {
+  .opds-shelf-banner { flex-direction: column; align-items: flex-start; }
+  .opds-shelf-sync-date { flex: none; }
+}
+
+/* ── Shelf new-book badge ────────────────────────────────────────────────────── */
+.shelf-new-badge {
+  font-size: .65rem;
+  font-weight: 700;
+  background: var(--color-accent);
+  color: #fff;
+  border-radius: 10px;
+  padding: 0 .35rem;
+  min-width: 1.2rem;
+  text-align: center;
+  line-height: 1.6;
+}
+.shelf-new-badge.hidden { display: none; }
+
+/* BookOrbit-unreachable warning icon — right-aligned like .shelf-count, shown when the
+   server is enabled but the last reachability check failed (see sidebar.js setBookorbitWarning). */
+.sidebar-item-warning { margin-left: auto; flex-shrink: 0; color: var(--warning, #d9822b); font-size: .9rem; }
+.sidebar-item-warning.hidden { display: none; }
+
+/* ── Grid density toggle ────────────────────────────────────────────────────── */
+.density-toggle {
+  display: flex; gap: .2rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius);
+  overflow: hidden;
+  flex-shrink: 0; /* never compress — its overflow:hidden would otherwise clip the icons */
+}
+.density-btn {
+  padding: .35rem .55rem; background: transparent; border: none;
+  color: var(--color-text-muted); cursor: pointer; font-size: 1rem; line-height: 1;
+  transition: background .15s, color .15s;
+}
+.density-btn:hover  { background: var(--color-border); color: var(--color-text); }
+.density-btn.active { background: var(--color-accent); color: #fff; }
+/* Active density button: invert icon so it shows white on the accent background */
+.density-btn.active img { filter: brightness(0) invert(1); }
+/* Icons inside btn-primary are always white (accent/black background in all themes) */
+.btn-primary .nav-icon { filter: brightness(0) invert(1); }
+/* Inactive icons: invert in dark themes so they're visible on dark backgrounds */
+html[data-lib-theme="night"] .density-btn img,
+.sidebar-layout[data-lib-theme="night"] .density-btn img { filter: brightness(0) invert(1); }
+@media (prefers-color-scheme: dark) {
+  html:not([data-lib-theme]) .density-btn img { filter: brightness(0) invert(1); }
+}
+/* E-ink library: swap to _bw variants; active still needs white icon on black bg */
+html[data-lib-theme="eink"] .nav-icon-density-compact { content: url('/images/density_compact_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-density-normal  { content: url('/images/density_normal_bw.svg'); }
+html[data-lib-theme="eink"] .nav-icon-density-large   { content: url('/images/density_large_bw.svg'); }
+
+/* ── Book grid ──────────────────────────────────────────────────────────────── */
+@keyframes card-appear {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.book-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1.25rem;
+  transition: opacity 110ms ease;
+}
+.book-grid.grid-exit { opacity: 0; }
+.book-grid.density-compact { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: .75rem; }
+.book-grid.density-normal  { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 1.25rem; }
+.book-grid.density-large   { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1.5rem; }
+.book-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform var(--transition), box-shadow var(--transition);
+  display: flex;
+  flex-direction: column;
+  animation: card-appear 220ms ease both;
+  animation-delay: calc(var(--card-index, 0) * 28ms);
+}
+.book-card:hover { transform: translateY(-4px); box-shadow: var(--shadow); }
+.book-card:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+[data-lib-theme="eink"] .book-grid { transition: none !important; }
+[data-lib-theme="eink"] .book-grid.grid-exit { opacity: 1 !important; }
+[data-lib-theme="eink"] .book-card { animation: none !important; }
+[data-lib-theme="eink"] .book-card:hover { transform: none; box-shadow: none; }
+[data-lib-theme="eink"] .book-card:focus-visible { outline: 2px solid #000; }
+.book-cover {
+  aspect-ratio: 2/3;
+  width: 100%;
+  object-fit: cover;
+  object-position: bottom;
+  background: var(--color-surface2);
+}
+.book-cover-placeholder {
+  aspect-ratio: 2/3;
+  width: 100%;
+  background: linear-gradient(135deg, var(--color-surface2), var(--color-bg));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3rem;
+}
+.book-info {
+  padding: .6rem .75rem .75rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+}
+.book-title  { font-size: .85rem; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.book-author { font-size: .75rem; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.book-series { font-size: .72rem; color: var(--color-accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: .1rem; }
+.book-series-num { opacity: .8; }
+.series-filter-btn {
+  background: none; border: none; padding: 0; margin: 0; cursor: pointer;
+  font: inherit; color: inherit; text-align: left;
+  text-decoration: underline dotted; text-underline-offset: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+}
+.series-filter-btn:hover { text-decoration: underline; }
+
+/* ── Series filter bar ──────────────────────────────────────────────────────── */
+.series-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  margin-bottom: .85rem;
+  padding: .35rem .75rem;
+  background: rgba(233,69,96,.1);
+  border: 1px solid rgba(233,69,96,.3);
+  border-radius: var(--radius);
+  font-size: .85rem;
+  color: var(--color-text);
+}
+.series-filter-label { color: var(--color-text-muted); flex-shrink: 0; }
+.series-filter-name  { font-weight: 600; color: var(--color-accent); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.series-filter-clear {
+  background: none; border: none; padding: 0 .15rem; margin: 0; cursor: pointer;
+  color: var(--color-text-muted); font-size: 1rem; line-height: 1; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.series-filter-clear:hover { color: var(--color-accent); }
+.book-progress-bar {
+  height: 3px;
+  background: var(--color-border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: auto;
+}
+.book-progress-fill { height: 100%; background: var(--color-accent); border-radius: 999px; transition: width .4s ease; }
+.book-progress-text { font-size: .7rem; color: var(--color-text-muted); }
+
+.book-card-actions {
+  display: none;
+  position: absolute;
+  top: .5rem;
+  right: .5rem;
+  left: .5rem;
+  gap: .3rem;
+  /* Compact density can be too narrow to fit every icon in one row (cover-preview + info +
+     offline-toggle + read) — wrap to a second row, right-aligned, instead of overflowing. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.book-card:hover .book-card-actions { display: flex; }
+.book-card { position: relative; }
+.book-card-actions .btn-icon {
+  /* Accent-colored rather than translucent black — a dark cover under a dark overlay made
+     these nearly invisible until hovered. A solid, saturated color reads against any cover. */
+  background: rgba(233, 69, 96, 0.9);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.5);
+  font-size: 1rem;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.book-card-actions .btn-icon:hover {
+  background: rgba(160, 20, 50, 0.95);
+  border-color: rgba(255, 255, 255, 0.7);
+  color: #fff;
+}
+/* Mobile: show actions when card is tapped (JS toggles this class) */
+.book-card.tapped .book-card-actions { display: flex; }
+/* Read/zoom buttons: invert SVG icon to white on the dark overlay background */
+.book-card-actions .read-btn .nav-icon,
+.book-card-actions .cover-preview-btn .nav-icon { filter: brightness(0) invert(1); }
+/* E-ink: light button bg so black _bw.svg is visible; undo the invert */
+html[data-lib-theme="eink"] .book-card-actions .btn-icon,
+.sidebar-layout[data-lib-theme="eink"] .book-card-actions .btn-icon {
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  border-color: rgba(0, 0, 0, 0.55);
+}
+html[data-lib-theme="eink"] .book-card-actions .btn-icon:hover,
+.sidebar-layout[data-lib-theme="eink"] .book-card-actions .btn-icon:hover {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+html[data-lib-theme="eink"] .book-card-actions .read-btn .nav-icon,
+html[data-lib-theme="eink"] .book-card-actions .cover-preview-btn .nav-icon,
+.sidebar-layout[data-lib-theme="eink"] .book-card-actions .read-btn .nav-icon,
+.sidebar-layout[data-lib-theme="eink"] .book-card-actions .cover-preview-btn .nav-icon { filter: none; }
+
+/* ── Empty state ────────────────────────────────────────────────────────────── */
+.empty-state {
+  text-align: center;
+  padding: 4rem 1rem;
+  color: var(--color-text-muted);
+}
+.empty-state .empty-icon { font-size: 4rem; margin-bottom: 1rem; }
+.empty-state p { margin-bottom: 1.5rem; }
+
+/* ── Modal ──────────────────────────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+  background: rgba(0,0,0,.65);
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  backdrop-filter: blur(2px);
+  overflow: hidden; /* prevent wheel events reaching page behind the modal */
+}
+.modal {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 480px;
+  padding: 2rem;
+  box-shadow: var(--shadow);
+  position: relative;
+}
+.modal h2 { margin-bottom: 1.25rem; font-size: 1.2rem; }
+.modal-close {
+  position: absolute; top: 1rem; right: 1rem;
+  background: none; border: none;
+  font-size: 1.4rem; cursor: pointer;
+  color: var(--color-text-muted);
+  line-height: 1;
+}
+.modal-close:hover { color: var(--color-text); }
+.modal-footer { display: flex; justify-content: flex-end; gap: .75rem; margin-top: 1.5rem; }
+
+/* ── Spinner ────────────────────────────────────────────────────────────────── */
+.spinner {
+  display: inline-block;
+  width: 1.2em; height: 1.2em;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Upload popup menu ──────────────────────────────────────────────────────── */
+.upload-menu-wrap {
+  position: relative;
+  display: inline-block;
+}
+.upload-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 180px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 200;
+  overflow: hidden;
+}
+.upload-menu-item {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  width: 100%;
+  padding: .65rem 1rem;
+  font-size: .9rem;
+  color: var(--color-text);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background var(--transition);
+}
+.upload-menu-item:hover { background: var(--color-surface2); text-decoration: none; }
+
+/* ── Upload drop zone ───────────────────────────────────────────────────────── */
+.drop-zone {
+  border: 2px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.25rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+  color: var(--color-text-muted);
+  max-width: 420px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--color-accent);
+  background: rgba(233,69,96,.05);
+  color: var(--color-text);
+}
+/* Keep the file input in the render tree (not display:none) — some older Android
+   WebViews refuse to open the file chooser when .click() targets a display:none
+   input. Hide it off-screen instead. */
+.drop-zone { position: relative; }
+.drop-zone-label { display: block; cursor: pointer; }
+/* Hide file inputs off-screen rather than display:none/hidden — some old Android
+   WebViews won't open the chooser for a display:none input even via a <label>. */
+.drop-zone input[type="file"],
+.admin-upload-btn input[type="file"],
+.file-input-offscreen {
+  position: absolute;
+  left: 0; top: 0;
+  width: 1px; height: 1px;
+  opacity: 0;
+  overflow: hidden;
+}
+.admin-upload-btn { position: relative; cursor: pointer; }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 999px; }
+
+/* ── Hamburger button ───────────────────────────────────────────────────────── */
+.nav-hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 28px;
+  height: 20px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.nav-hamburger span {
+  display: block;
+  height: 2px;
+  width: 100%;
+  background: var(--color-text);
+  border-radius: 2px;
+  transition: transform .2s, opacity .2s;
+}
+/* Animate to X when open */
+.nav-hamburger[aria-expanded="true"] span:nth-child(1) { transform: translateY(9px) rotate(45deg); }
+.nav-hamburger[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+.nav-hamburger[aria-expanded="true"] span:nth-child(3) { transform: translateY(-9px) rotate(-45deg); }
+
+/* ── Responsive ─────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .app-main    { padding: 1rem; padding-bottom: calc(1rem + var(--sab, env(safe-area-inset-bottom, 0px))); }
+  .app-header  { padding: 0 1rem; position: sticky; flex-wrap: wrap; height: auto; min-height: var(--header-height); }
+  .book-grid,
+  .book-grid.density-normal  { grid-template-columns: repeat(2, 1fr); gap: .75rem; }
+  .book-grid.density-compact { grid-template-columns: repeat(3, 1fr); gap: .5rem; }
+  .book-grid.density-large   { grid-template-columns: repeat(1, 1fr); gap: 1rem; }
+  .modal       { padding: 1.25rem; }
+
+  /* Show hamburger, hide inline nav */
+  .nav-hamburger { display: flex; }
+  .app-header nav {
+    display: none;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: .5rem;
+    width: 100%;
+    padding: .75rem 0;
+    border-top: 1px solid var(--color-border);
+    order: 3;
+  }
+  .app-header nav.open { display: flex; }
+  .app-header nav .btn { width: 100%; justify-content: flex-start; }
+  #username-label { order: -1; }
+}
+
+/* ── Sidebar layout (library / index page) ─────────────────────────────────── */
+.sidebar-layout {
+  display: flex;
+  flex-direction: row;
+  min-height: 100vh;
+  /* Allow scrolling but block pinch-zoom and double-tap-zoom on the library (scoped
+     here so the reader, which owns its own touch gestures, is unaffected). */
+  touch-action: pan-x pan-y;
+}
+
+.app-sidebar {
+  width: var(--sidebar-width);
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding-top: var(--sat, env(safe-area-inset-top, 0px));
+  padding-left: var(--sal, env(safe-area-inset-left, 0px));
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: width var(--transition);
+  z-index: 200;
+}
+
+/* Collapsed sidebar — icon-only strip */
+.app-sidebar.collapsed { width: 52px; }
+.app-sidebar.collapsed .sidebar-item-label,
+.app-sidebar.collapsed .sidebar-section-title,
+.app-sidebar.collapsed .sidebar-add-btn,
+.app-sidebar.collapsed .shelf-count,
+.app-sidebar.collapsed .sidebar-item-warning,
+.app-sidebar.collapsed .shelf-edit-btn,
+.app-sidebar.collapsed .sidebar-theme,
+.app-sidebar.collapsed .sidebar-username,
+.app-sidebar.collapsed .sidebar-divider { display: none; }
+.app-sidebar.collapsed .logo { display: none; }
+.app-sidebar.collapsed .sidebar-header { justify-content: center; padding: .75rem .5rem; }
+.app-sidebar.collapsed .sidebar-item   { justify-content: center; padding: .55rem; }
+.app-sidebar.collapsed .sidebar-shelf-item { justify-content: center; padding: .45rem; }
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem .75rem;
+  flex-shrink: 0;
+}
+
+.sidebar-collapse-btn {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  width: 28px; height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.sidebar-collapse-btn:hover { color: var(--color-text); background: var(--color-surface2); }
+
+.sidebar-nav { flex: 1; overflow-y: auto; padding: .5rem; }
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .55rem .75rem;
+  border-radius: var(--radius);
+  color: var(--color-text);
+  text-decoration: none;
+  font-size: .9rem;
+  cursor: pointer;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  transition: background var(--transition);
+}
+.sidebar-item:hover { background: var(--color-surface2); text-decoration: none; }
+.sidebar-item-active { background: rgba(233,69,96,.12) !important; color: var(--color-accent); font-weight: 600; }
+.sidebar-item-btn { appearance: none; -webkit-appearance: none; }
+
+.sidebar-item-icon { font-size: 1rem; flex-shrink: 0; line-height: 1.2; display: flex; align-items: center; }
+
+.sidebar-section { margin-top: .25rem; }
+.sidebar-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .5rem .75rem .2rem;
+}
+.sidebar-section-btns {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+}
+.sidebar-section-title {
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--color-text-muted);
+}
+.sidebar-add-btn {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  width: 22px; height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .95rem;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.sidebar-add-btn:hover { color: var(--color-accent); border-color: var(--color-accent); }
+
+.sidebar-shelf-item {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .45rem .75rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: .88rem;
+  color: var(--color-text);
+  transition: background var(--transition);
+  position: relative;
+}
+.sidebar-shelf-item:hover { background: var(--color-surface2); }
+
+/* Drag-to-reorder — hidden until edit mode is active */
+.shelf-drag-handle {
+  display: none;
+  cursor: grab;
+  font-size: .9rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  line-height: 1;
+  user-select: none;
+}
+#shelves-list.shelves-edit-mode .shelf-drag-handle { display: flex; align-items: center; }
+[data-lib-theme="eink"] .shelf-drag-handle { display: none !important; }
+
+.sidebar-shelf-item.drag-active { opacity: .45; }
+.sidebar-shelf-item.drag-over   { border-top: 2px solid var(--color-accent); }
+
+.shelf-count {
+  font-size: .72rem;
+  color: var(--color-text-muted);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.shelf-edit-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: .1rem .3rem;
+  border-radius: 4px;
+  font-size: .85rem;
+  flex-shrink: 0;
+}
+#shelves-list.shelves-edit-mode .shelf-edit-btn { display: flex; align-items: center; }
+.shelf-edit-btn:hover { color: var(--color-text); background: var(--color-border); }
+
+/* Edit mode toggle button — active state */
+.sidebar-add-btn.active {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: .5rem .75rem;
+}
+
+.sidebar-footer {
+  padding: .75rem .5rem;
+  padding-bottom: calc(.75rem + var(--sab, env(safe-area-inset-bottom, 0px)));
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  flex-shrink: 0;
+}
+/* Logout + GitHub link on one row */
+.sidebar-footer-row { display: flex; align-items: center; }
+.sidebar-footer-row .sidebar-item-btn { flex: 1; min-width: 0; }
+.sidebar-github-link {
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: .55rem .7rem;
+  border-radius: var(--radius);
+  opacity: .65;
+  transition: opacity var(--transition), background var(--transition);
+}
+.sidebar-github-link:hover { opacity: 1; background: var(--color-surface2); text-decoration: none; }
+.sidebar-github-link .nav-icon { width: 1.25rem; height: 1.25rem; }
+/* Collapsed sidebar: keep only the logout icon, hide the GitHub link */
+.app-sidebar.collapsed .sidebar-github-link { display: none; }
+.sidebar-theme {
+  padding: .35rem .75rem .55rem;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+.sidebar-theme-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .35rem;
+}
+.sidebar-theme-btn {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  border-radius: var(--radius);
+  padding: .32rem .4rem;
+  font-size: .75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+.sidebar-theme-btn:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-muted);
+}
+.sidebar-theme-btn.active {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: rgba(233,69,96,.1);
+}
+.sidebar-username-row {
+  display: flex;
+  align-items: center;
+  gap: .25rem;
+}
+.sidebar-username {
+  font-size: .78rem;
+  color: var(--color-text-muted);
+  padding: .3rem .75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.sidebar-stats-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: .25rem .5rem .25rem .25rem;
+  border-radius: var(--radius);
+  opacity: .6;
+  transition: opacity var(--transition);
+  display: flex;
+  align-items: center;
+}
+.sidebar-stats-btn:hover { opacity: 1; }
+.sidebar-stats-btn img  { width: 1rem; height: 1rem; display: block; }
+.app-sidebar.collapsed .sidebar-stats-btn { display: none; }
+
+/* ── Stats modal ───────────────────────────────────────────────────────────── */
+.stats-modal {
+  max-width: 520px;
+  max-height: 85vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.stats-modal-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 1.25rem;
+  display: flex;
+  align-items: center;
+}
+.stats-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .6rem;
+  margin-bottom: 1.25rem;
+}
+@media (max-width: 480px) {
+  .stats-summary-grid { grid-template-columns: repeat(2, 1fr); }
+}
+.stats-card {
+  background: var(--color-surface2);
+  border-radius: var(--radius);
+  padding: .65rem .75rem;
+  text-align: center;
+}
+.stats-card-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-accent);
+  line-height: 1.2;
+}
+.stats-card-label {
+  font-size: .7rem;
+  color: var(--color-text-muted);
+  margin-top: .2rem;
+}
+.stats-section-title {
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-bottom: .6rem;
+}
+.stats-top-books { display: flex; flex-direction: column; gap: .4rem; }
+.stats-book-row  { display: flex; align-items: center; gap: .65rem; }
+.stats-book-cover {
+  width: 2.4rem;
+  height: 3.2rem;
+  object-fit: cover;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.stats-book-cover-ph {
+  width: 2.4rem;
+  height: 3.2rem;
+  background: var(--color-surface2);
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+.stats-book-title { font-size: .85rem; font-weight: 500; }
+.stats-book-meta  { font-size: .75rem; color: var(--color-text-muted); margin-top: .1rem; }
+.stats-history-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 1rem; }
+.stats-history-book {
+  background: var(--color-surface2);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.stats-history-summary {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .55rem .75rem;
+  cursor: pointer;
+  list-style: none;
+  font-size: .85rem;
+  font-weight: 500;
+}
+.stats-history-summary::-webkit-details-marker { display: none; }
+.stats-history-book-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-history-count {
+  font-size: .72rem;
+  background: var(--color-border);
+  border-radius: 9px;
+  padding: .1rem .45rem;
+  flex-shrink: 0;
+}
+.stats-clear-book-btn {
+  flex-shrink: 0;
+  padding: .1rem .45rem !important;
+  font-size: .75rem !important;
+  line-height: 1.2 !important;
+}
+.stats-history-items {
+  list-style: none;
+  padding: 0 .75rem .55rem;
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+.stats-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: .78rem;
+  gap: .5rem;
+}
+.stats-history-chapter { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-history-date    { flex-shrink: 0; color: var(--color-text-muted); font-size: .72rem; }
+.stats-footer {
+  display: flex;
+  gap: .5rem;
+  justify-content: flex-end;
+  margin-top: 1.25rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--color-border);
+  flex-wrap: wrap;
+}
+
+/* ── Language picker (custom dropdown, same look as sort menu) ───────────────── */
+.lang-picker-icon {
+  font-size: .9rem;
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  line-height: 1;
+}
+.lang-menu-wrap {
+  position: relative;
+  padding: .35rem .75rem;
+}
+.lang-menu-btn {
+  width: 100%;
+  padding: .4rem .65rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--color-surface), var(--color-surface2));
+  color: var(--color-text);
+  font-size: .82rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.lang-menu-btn:hover { border-color: var(--color-text-muted); }
+.lang-menu-btn[aria-expanded="true"] {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(233,69,96,.12);
+}
+.lang-menu-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.lang-menu-caret { color: var(--color-text-muted); font-size: .82rem; flex-shrink: 0; }
+.lang-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: .75rem; right: .75rem;
+  z-index: 400;
+  background: var(--color-surface); /* fallback for WebViews without color-mix() */
+  background: color-mix(in srgb, var(--color-surface) 92%, var(--color-bg) 8%);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,.28);
+  padding: .35rem;
+  min-width: 160px;
+}
+.lang-menu-list.lang-menu-up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+.lang-menu-option {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  padding: .48rem .75rem;
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: .82rem;
+  cursor: pointer;
+  text-align: left;
+  gap: .5rem;
+}
+.lang-menu-option:hover,
+.lang-menu-option:focus-visible { background: var(--color-surface2); outline: none; }
+.lang-menu-option.active { background: rgba(233,69,96,.1); color: var(--color-accent); font-weight: 700; }
+.lang-menu-check { opacity: 0; color: currentColor; flex-shrink: 0; }
+.lang-menu-option.active .lang-menu-check { opacity: 1; }
+
+/* Collapsed sidebar: show only 🌐 icon */
+.app-sidebar.collapsed .lang-menu-label,
+.app-sidebar.collapsed .lang-menu-caret { display: none; }
+.app-sidebar.collapsed .lang-menu-btn {
+  width: auto;
+  border: none;
+  background: none;
+  box-shadow: none;
+  padding: .35rem .4rem;
+  justify-content: center;
+}
+.app-sidebar.collapsed .lang-picker-icon { font-size: 1.2rem; }
+.app-sidebar.collapsed .lang-menu-wrap { padding: .4rem 0; display: flex; justify-content: center; }
+
+/* Login page lang row */
+.login-lang-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: .6rem;
+}
+.login-lang-row .lang-menu-wrap { padding: .1rem 0; min-width: 180px; }
+
+/* Body area next to sidebar */
+.app-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding-right: var(--sar, env(safe-area-inset-right, 0px));
+  /* Hide the scrollbar on the content column — it still scrolls, just without the bar. */
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;         /* legacy Edge */
+}
+.app-body::-webkit-scrollbar { width: 0; height: 0; display: none; } /* WebKit/Blink */
+
+/* Desktop app-shell: the whole window is fixed to the viewport height, the sidebar
+   stays put at full height (scrolling internally only if its own content overflows),
+   and ONLY the content column (toolbar + book grid) scrolls. Uses height:100% (not
+   100vh) so it stays correct under the Display-size CSS zoom. Mobile keeps its
+   off-canvas drawer + window scroll (see the max-width:768px block). */
+@media (min-width: 769px) {
+  .sidebar-layout { height: 100%; min-height: 0; overflow: hidden; }
+  .app-sidebar    { position: relative; top: auto; height: 100%; }
+  .app-body       { min-height: 0; overflow-y: auto; }
+}
+
+/* Mobile top bar with hamburger (hidden on desktop) */
+.app-body-header {
+  display: none;
+  align-items: center;
+  gap: .75rem;
+  padding: calc(.5rem + var(--sat, env(safe-area-inset-top, 0px))) 1rem .75rem;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-shrink: 0;
+}
+.sidebar-hamburger {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 24px; height: 18px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.sidebar-hamburger span {
+  display: block;
+  height: 2px;
+  width: 24px;
+  background: var(--color-text);
+  border-radius: 2px;
+}
+
+/* Sidebar overlay on mobile */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: 0; right: 0; bottom: 0; left: 0;
+  background: rgba(0,0,0,.5);
+  z-index: 199;
+}
+.sidebar-overlay.visible { display: block; }
+
+/* ── Book info modal ─────────────────────────────────────────────────────────── */
+.info-modal {
+  max-width: 720px !important;
+  height: calc(100vh - 2rem);
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+/* ── Header (always visible, all tabs) */
+.info-modal-header {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-shrink: 0;
+  padding-bottom: .75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.info-modal-hero { flex: 1; min-width: 0; }
+.info-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  margin-top: .5rem;
+}
+.imt-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface2);
+  cursor: pointer;
+  text-decoration: none;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.imt-action-btn:hover { background: var(--color-surface3, rgba(255,255,255,.12)); }
+.imt-action-btn img { width: 18px; height: 18px; opacity: .85; }
+/* ── Tab bar */
+.info-modal-tabs {
+  display: flex;
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--color-border);
+  gap: 0;
+  margin-top: .25rem;
+}
+.info-modal-tabs::-webkit-scrollbar { display: none; }
+.imt-tab {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: .85rem;
+  font-weight: 600;
+  padding: .5rem .9rem;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+  margin-bottom: -1px;
+}
+.imt-tab:hover { color: var(--color-text); }
+.imt-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+/* ── Scrollable tab content */
+.info-modal-tab-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+  padding: .75rem .6rem 0 .1rem;
+}
+.info-modal-tab-content::-webkit-scrollbar { width: 4px; }
+.info-modal-tab-content::-webkit-scrollbar-track { background: transparent; }
+.info-modal-tab-content::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
+.imt-panel { display: block; }
+/* ── Reading tab */
+.imt-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .2rem .75rem;
+  margin-bottom: .5rem;
+}
+.imt-meta-pair { display: flex; gap: .35rem; font-size: .82rem; align-items: baseline; min-width: 0; }
+.imt-meta-label { color: var(--color-text-muted); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+.imt-section-title {
+  font-size: .7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--color-text-muted);
+  margin-bottom: .4rem;
+}
+.imt-reading-summary { font-size: .83rem; color: var(--color-text-muted); margin-bottom: .4rem; }
+.imt-session-list { display: flex; flex-direction: column; gap: 0; margin-bottom: .5rem; border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+.imt-session-header { display: grid; grid-template-columns: 1fr auto auto; gap: .5rem; align-items: start; padding: .25rem .5rem; background: var(--color-surface2); font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--color-text-muted); }
+.imt-session-row { display: grid; grid-template-columns: 1fr auto auto; gap: .5rem; align-items: start; padding: .3rem .5rem; font-size: .82rem; border-top: 1px solid var(--color-border); }
+.imt-session-date { color: var(--color-text); }
+.imt-session-time { display: block; font-size: .74rem; color: var(--color-text-muted); margin-top: .1rem; }
+.imt-session-dur  { font-weight: 600; white-space: nowrap; }
+.imt-session-pages { color: var(--color-text-muted); font-size: .78rem; white-space: nowrap; min-width: 3.5rem; text-align: right; }
+.imt-reading-row {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  font-size: .82rem;
+  padding: .25rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.imt-reading-row:last-child { border-bottom: none; }
+.imt-reading-pct { color: var(--color-text-muted); font-size: .76rem; min-width: 2.4rem; flex-shrink: 0; }
+.imt-reading-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imt-reading-note { color: var(--color-text-muted); font-size: .76rem; }
+.imt-del-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: .1rem .3rem;
+  border-radius: 3px;
+  flex-shrink: 0;
+  transition: color .15s, background .15s;
+}
+.imt-del-btn:hover { color: #c62828; background: rgba(198,40,40,.1); }
+.imt-empty { font-size: .83rem; color: var(--color-text-muted); padding: .5rem 0; }
+.btn-xs { padding: .2rem .5rem; font-size: .75rem; }
+/* ── Related tab (BookOrbit recommendations / series) */
+.imt-related-scroller {
+  display: flex;
+  gap: .6rem;
+  overflow-x: auto;
+  padding-bottom: .4rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+.imt-related-scroller::-webkit-scrollbar { height: 5px; }
+.imt-related-scroller::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+.imt-related-card { flex: 0 0 auto; width: 96px; display: block; color: inherit; text-decoration: none; }
+.imt-related-cover-wrap {
+  position: relative;
+  width: 96px;
+  height: 144px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--color-surface2);
+  box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.imt-related-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+.imt-related-cover-ph { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 1.8rem; opacity: .5; }
+.imt-related-series-badge {
+  position: absolute; top: 4px; right: 4px;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  background: var(--color-accent); color: #fff;
+  font-size: .68rem; font-weight: 700; line-height: 18px;
+  border-radius: 999px;
+  text-align: center;
+}
+html[data-lib-theme="eink"] .imt-related-series-badge { background: #111; }
+.imt-related-bo-badge {
+  position: absolute; bottom: 5px; right: 5px;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.60);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  display: flex; align-items: center; justify-content: center;
+}
+.imt-related-bo-badge .nav-icon { width: 12px; height: 12px; }
+html[data-lib-theme="eink"] .imt-related-bo-badge {
+  background: rgba(255, 255, 255, 0.90);
+  border-color: rgba(0, 0, 0, 0.35);
+}
+.imt-related-title {
+  font-size: .76rem;
+  font-weight: 600;
+  margin-top: .3rem;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.imt-related-author { font-size: .7rem; color: var(--color-text-muted); margin-top: .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 640px) {
+  .imt-related-card { width: 84px; }
+  .imt-related-cover-wrap { width: 84px; height: 126px; }
+}
+.series-filter-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-accent);
+  font-size: .82rem;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.info-modal-cover-wrap {
+  position: relative;
+  flex-shrink: 0;
+  align-self: stretch;
+}
+.info-modal-cover {
+  width: 110px;
+  min-width: 110px; /* prevent genres from squeezing cover */
+  height: 100%;
+  min-height: 165px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  display: block;
+  background: var(--color-surface2);
+}
+.info-modal-cover-clickable {
+  cursor: zoom-in;
+}
+.info-modal-cover-ph {
+  width: 110px;
+  min-height: 165px;
+  background: linear-gradient(135deg, var(--color-surface2), var(--color-bg));
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.5rem;
+}
+.book-format-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  padding: 2px 5px;
+  border-radius: 4px;
+  line-height: 1.4;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+.book-format-badge--epub {
+  background: rgba(0, 0, 0, .52);
+  color: #fff;
+}
+.book-format-badge--cbz {
+  background: #e8650a;
+  color: #fff;
+}
+/* ── Book card status / rating badges ───────────────────────────────────────── */
+.book-status-badge {
+  display: inline-block;
+  font-size: .66rem;
+  font-weight: 600;
+  color: #fff;
+  padding: .05rem .4rem;
+  border-radius: 10px;
+}
+.book-status-badge--want_to_read { background: #6c7a89; }
+.book-status-badge--reading      { background: #2196f3; }
+.book-status-badge--read         { background: #4caf50; }
+.book-status-badge--abandoned    { background: #b0653a; }
+.book-rating-badge  { font-size: .75rem; letter-spacing: -1px; }
+.book-rating-filled { color: #f5c518; }
+.book-rating-empty  { color: #ccc; }
+.info-modal-meta { flex: 1; min-width: 0; }
+.info-modal-title  { font-size: 1.05rem; font-weight: 700; margin-bottom: .4rem; line-height: 1.3; }
+.info-modal-author { font-size: .88rem; color: var(--color-text-muted); margin-bottom: .25rem; }
+.info-modal-series { font-size: .82rem; color: var(--color-accent); margin-bottom: .25rem; }
+.info-modal-filesize { font-size: .78rem; color: var(--color-text-muted); margin-top: .5rem; }
+.info-modal-genres {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  margin-top: .6rem;
+}
+.genre-pill {
+  display: inline-block;
+  padding: .15rem .55rem;
+  font-size: .72rem;
+  font-weight: 600;
+  background: rgba(233,69,96,.12);
+  color: var(--color-accent);
+  border: 1px solid rgba(233,69,96,.25);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.info-modal-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem .85rem;
+  margin-top: .45rem;
+  font-size: .78rem;
+  color: var(--color-text);
+}
+.info-meta-label {
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+.info-modal-section-title {
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--color-text-muted);
+  margin-bottom: .4rem;
+}
+.info-modal-progress-row {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  margin-bottom: .25rem;
+}
+.info-modal-progress-bar-wrap {
+  flex: 1;
+  height: 6px;
+  background: var(--color-progress-bg, rgba(128,128,128,.2));
+  border-radius: 3px;
+  overflow: hidden;
+}
+.info-modal-progress-bar-fill {
+  height: 100%;
+  background: var(--color-accent, #6c8ebf);
+  border-radius: 3px;
+  transition: width .3s ease;
+}
+.info-modal-progress-pct {
+  font-size: .85rem;
+  font-weight: 600;
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+/* ── KOSync section in info modal ─────────────────────────────────────────── */
+.info-modal-kosync-body {
+  padding: .5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+}
+.info-modal-kosync-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .82rem;
+}
+.info-modal-kosync-label {
+  color: var(--color-text-muted);
+  min-width: 7rem;
+  flex-shrink: 0;
+}
+.info-modal-kosync-value {
+  font-family: monospace;
+  font-size: .78rem;
+  word-break: break-all;
+  color: var(--color-text);
+  flex: 1;
+}
+.info-modal-kosync-badge {
+  font-size: .7rem;
+  background: var(--color-accent, #6c8ebf);
+  color: #fff;
+  border-radius: 3px;
+  padding: .1rem .35rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.info-modal-kosync-edit { display: flex; flex-direction: column; gap: .4rem; }
+.info-modal-kosync-input {
+  width: 100%;
+  font-family: monospace;
+  font-size: .82rem;
+  padding: .4rem .6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-input-bg, rgba(255,255,255,.06));
+  color: var(--color-text);
+  outline: none;
+}
+.info-modal-kosync-input:focus { border-color: var(--color-accent, #6c8ebf); }
+.info-modal-kosync-error {
+  font-size: .78rem;
+  color: #c62828;
+}
+.info-modal-kosync-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+.info-modal-kosync-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: .25rem 0;
+}
+.info-modal-kosync-opds-row {
+  display: flex;
+  gap: .4rem;
+  flex-wrap: wrap;
+}
+.info-modal-kosync-search-input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: .4rem .6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-input-bg, rgba(255,255,255,.06));
+  color: var(--color-text);
+  font-size: .82rem;
+  outline: none;
+}
+.info-modal-kosync-search-input:focus { border-color: var(--color-accent, #6c8ebf); }
+.info-modal-kosync-results {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  margin-top: .25rem;
+}
+.info-modal-kosync-result {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .35rem .4rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: .82rem;
+}
+.info-modal-kosync-result-cover {
+  width: 32px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.info-modal-kosync-result-meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.info-modal-kosync-result-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.info-modal-kosync-result-author {
+  color: var(--color-text-muted);
+  font-size: .76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.info-modal-kosync-no-results {
+  font-size: .82rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: .5rem;
+}
+
+/* Offline mode banner */
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  background: var(--color-surface2);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: .6rem 1rem;
+  margin-bottom: 1rem;
+  font-size: .85rem;
+  color: var(--color-text-muted);
+}
+
+/* Cover area wrapper — positions badge and peek button relative to the cover */
+.book-cover-area { position: relative; }
+
+/* Peek button — always-visible small icon at the bottom-right of the cover */
+.book-card-peek-btn {
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  /* Matches .book-card-actions .btn-icon's accent background (~line 725) — same low-contrast
+     issue on very dark covers, same fix. */
+  background: rgba(233, 69, 96, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity .15s;
+  z-index: 2;
+  text-decoration: none;
+}
+.book-card-peek-btn .nav-icon { width: 14px; height: 14px; }
+.book-card:hover .book-card-peek-btn,
+.book-card.tapped .book-card-peek-btn { opacity: 1; }
+html[data-lib-theme="eink"] .book-card-peek-btn,
+.sidebar-layout[data-lib-theme="eink"] .book-card-peek-btn {
+  background: rgba(255, 255, 255, 0.90);
+  border-color: rgba(0, 0, 0, 0.55);
+}
+
+/* Three-dots context-menu trigger on book card */
+.book-card-menu-btn {
+  position: absolute;
+  bottom: .3rem;
+  right: .3rem;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  border: none;
+  border-radius: 4px;
+  font-size: 17px;
+  line-height: 1;
+  letter-spacing: 0;
+  cursor: pointer;
+  padding: 0 0 2px 0;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  transition: color var(--transition);
+  z-index: 4;
+}
+.book-card-menu-btn:hover { color: #fff; }
+html[data-lib-theme="day"] .book-card-menu-btn,
+html[data-lib-theme="eink"] .book-card-menu-btn,
+.sidebar-layout[data-lib-theme="day"] .book-card-menu-btn,
+.sidebar-layout[data-lib-theme="eink"] .book-card-menu-btn {
+  color: rgba(0, 0, 0, 0.6);
+  text-shadow: none;
+}
+html[data-lib-theme="day"] .book-card-menu-btn:hover,
+html[data-lib-theme="eink"] .book-card-menu-btn:hover,
+.sidebar-layout[data-lib-theme="day"] .book-card-menu-btn:hover,
+.sidebar-layout[data-lib-theme="eink"] .book-card-menu-btn:hover { color: #000; }
+@media (prefers-color-scheme: light) {
+  html:not([data-lib-theme]) .book-card-menu-btn { color: rgba(0, 0, 0, 0.6); text-shadow: none; }
+  html:not([data-lib-theme]) .book-card-menu-btn:hover { color: #000; }
+}
+
+/* Card context-menu popup */
+.book-card-menu-popup {
+  position: fixed;
+  min-width: 158px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: .45rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
+  overflow: hidden;
+  z-index: 9000;
+  transform-origin: bottom right;
+  animation: bcm-open .14s cubic-bezier(0.2, 0, 0, 1.15);
+}
+.book-card-menu-popup.no-anim { animation: none; }
+@keyframes bcm-open {
+  from { opacity: 0; transform: scale(.82); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.bcm-item {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  width: 100%;
+  padding: .48rem .75rem;
+  font-size: .85rem;
+  color: var(--color-text);
+  text-decoration: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: left;
+  font-family: inherit;
+}
+.bcm-item + .bcm-item { border-top: 1px solid var(--color-border); }
+.bcm-item:hover:not(:disabled) { background: var(--color-surface2); }
+.bcm-item:disabled { opacity: .45; cursor: default; }
+.bcm-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  /* These are full-colour illustrations, not flat monochrome glyphs — shown as-is
+     in every theme rather than filter-inverted (which just turns them into an
+     unreadable white blob on dark backgrounds). */
+}
+.bcm-icon-char {
+  width: 15px;
+  height: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+/* Offline badge on book card cover */
+.book-offline-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 18px;
+  height: 18px;
+  background: var(--color-success, #4caf50);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #fff;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* Download-in-progress overlay on book card cover — shown while downloadBook() streams the
+   EPUB via the service worker, driven by the SW's DOWNLOAD_PROGRESS messages (offline.js). */
+.book-download-progress {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 3;
+  pointer-events: none;
+}
+.book-download-progress-pct {
+  color: #fff;
+  font-size: .95rem;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .6);
+}
+.book-download-progress-track {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 14px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .25);
+  overflow: hidden;
+}
+.book-download-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--color-accent, #e94560);
+  transition: width .15s linear;
+}
+
+/* Series-number badge, bottom-left of the cover — a slightly-transparent black rounded rectangle
+   with white text (like a Goodreads/store-badge style corner tag), not a pill/button. Opposite
+   corner from the peek button so the two never collide. Mirrored by .opds-card-series-badge/
+   .bookorbit-card-series-badge below. */
+.book-series-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  padding: .15rem .45rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: .72rem;
+  font-weight: 700;
+  line-height: 1.3;
+  z-index: 2;
+  pointer-events: none;
+}
+html[data-lib-theme="eink"] .book-series-badge,
+.sidebar-layout[data-lib-theme="eink"] .book-series-badge {
+  background: rgba(255, 255, 255, 0.85);
+  color: #111;
+}
+
+/* Offline button in card actions */
+.offline-btn { opacity: .85; }
+.offline-btn:hover { opacity: 1; }
+.offline-btn.downloading { opacity: .5; cursor: default; }
+
+/* Small spinner for download progress inside card */
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+/* Session restore banner */
+.session-restore-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: var(--color-accent);
+  color: #fff;
+  padding: .6rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-size: .88rem;
+}
+.session-restore-banner strong { font-weight: 700; }
+.session-restore-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-restore-actions { display: flex; gap: .5rem; flex-shrink: 0; }
+.session-restore-actions .btn-ghost { color: #fff; border: 1px solid rgba(255,255,255,.7); background: rgba(0,0,0,.15); }
+.session-restore-actions .btn-ghost:hover { background: rgba(0,0,0,.3); }
+.info-modal-desc {
+  font-size: .85rem;
+  line-height: 1.6;
+  margin-bottom: .5rem;
+  text-align: justify;
+}
+.info-modal-shelves { margin-top: .25rem; }
+.info-modal-shelf-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .28rem 0;
+  font-size: .9rem;
+  cursor: pointer;
+}
+.info-modal-shelf-row input[type="checkbox"] { cursor: pointer; }
+.info-modal-shelf-row .shelf-book-count { color: var(--color-text-muted); font-size: .75rem; margin-left: auto; }
+.info-modal-shelf-row-linked { cursor: default; opacity: .7; }
+.info-modal-shelf-row-linked input[type="checkbox"] { cursor: not-allowed; }
+.info-modal-shelf-row-linked .shelf-book-count { margin-left: 0; }
+.shelf-lock-hint { font-size: .75rem; margin-left: .35rem; }
+.info-modal-footer { justify-content: space-between !important; flex-wrap: wrap; gap: .5rem; flex-shrink: 0; }
+
+/* ── Cover preview overlay ───────────────────────────────────────────────────── */
+.cover-preview-overlay {
+  position: fixed;
+  top: 0; right: 0; bottom: 0; left: 0;
+  background: rgba(0, 0, 0, .88);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  cursor: zoom-out;
+  backdrop-filter: blur(4px);
+  animation: fadeIn .15s ease;
+}
+.cover-preview-img {
+  max-width: min(90vw, 420px);
+  max-height: 90vh;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 40px rgba(0,0,0,.7);
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── OPDS nav-tile sync button ───────────────────────────────────────────────── */
+.nav-tile { position: relative; }
+.nav-tile-sync-btn {
+  position: absolute;
+  top: .3rem;
+  right: .3rem;
+  background: rgba(0,0,0,.55);
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  padding: .15rem .4rem;
+  font-size: .72rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s;
+  white-space: nowrap;
+}
+.nav-tile:hover .nav-tile-sync-btn { opacity: 1; }
+
+/* ── Sidebar responsive ──────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .app-sidebar {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    height: 100%;
+    transform: translateX(-100%);
+    transition: transform .25s ease;
+    width: var(--sidebar-width) !important; /* always full width on mobile */
+    z-index: 300;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+  .app-sidebar.open { transform: translateX(0); }
+  html[data-lib-theme="eink"] .app-sidebar { transition: none; }
+  .sidebar-nav { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  .app-body-header  { display: flex; }
+  .sidebar-collapse-btn { display: none; }
+  .app-sidebar.open .sidebar-collapse-btn { display: flex; }
+}
+
+@media (max-width: 480px) {
+  /* On mobile: fixed height (prevents tab-switching jumps) + whole modal scrolls */
+  .info-modal {
+    display: block;
+    height: calc(100vh - var(--sat, env(safe-area-inset-top, 0px)) - var(--sab, env(safe-area-inset-bottom, 0px)) - 1rem);
+    max-height: calc(100vh - var(--sat, env(safe-area-inset-top, 0px)) - var(--sab, env(safe-area-inset-bottom, 0px)) - 1rem);
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+    overscroll-behavior: contain;
+    padding-top: calc(var(--sat, env(safe-area-inset-top, 0px)) + 0.5rem);
+    padding-bottom: calc(var(--sab, env(safe-area-inset-bottom, 0px)) + 0.5rem);
+  }
+  .info-modal::-webkit-scrollbar { display: none; }
+  /* Wrap onto multiple rows instead of relying on a horizontal-scroll gesture — more
+     tabs (Related) no longer fit one row on narrow screens, and swipe-to-scroll isn't
+     reliably discoverable (scrollbar hidden) or supported on older e-reader WebViews. */
+  .info-modal-tabs { flex-wrap: wrap; overflow-x: visible; }
+  .imt-tab { padding: .4rem .6rem; font-size: .8rem; }
+  .info-modal-tab-content { overflow: visible; flex: none; }
+  .info-modal-kosync-results { overflow: visible; max-height: none; }
+  .info-modal-header { flex-direction: column; }
+  .info-modal-cover-wrap { width: 100%; align-self: auto; }
+  .info-modal-cover, .info-modal-cover-ph { width: 100%; min-height: 120px; height: auto; }
+  .imt-meta-grid { grid-template-columns: 1fr; }
+  /* Close button sits over the full-width cover on mobile — give it a visible background */
+  .info-modal .modal-close {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 50%;
+    width: 2rem; height: 2rem;
+    display: flex; align-items: center; justify-content: center;
+    top: calc(var(--sat, env(safe-area-inset-top, 0px)) + 0.6rem);
+    right: .6rem;
+    z-index: 1;
+  }
+}
+
+/* ── Sort select ─────────────────────────────────────────────────────────── */
+.sort-select {
+  height: 2.2rem;
+  padding: 0 .6rem;
+  background: var(--color-surface2);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: .875rem;
+  cursor: pointer;
+}
+.sort-select:focus { outline: none; border-color: var(--color-accent); }
+
+.sort-menu-wrap {
+  position: relative;
+  min-width: 160px;
+}
+.sort-menu-btn {
+  min-height: 2.2rem;
+  width: 100%;
+  padding: .48rem .75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--color-surface), var(--color-surface2));
+  color: var(--color-text);
+  font-size: .86rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .65rem;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
+}
+#sort-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sort-menu-caret { flex-shrink: 0; }
+.sort-menu-btn:hover {
+  border-color: var(--color-text-muted);
+}
+.sort-menu-btn[aria-expanded="true"] {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(233,69,96,.12);
+}
+.sort-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sort-menu-caret {
+  color: var(--color-text-muted);
+  font-size: .82rem;
+  flex-shrink: 0;
+}
+.sort-menu-list {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 220;
+  background: var(--color-surface); /* fallback for WebViews without color-mix() */
+  background: color-mix(in srgb, var(--color-surface) 92%, var(--color-bg) 8%);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,.28);
+  padding: .35rem;
+  backdrop-filter: blur(10px);
+  /* Harmless for the original short sort-order lists (never reached); needed once this widget
+     started getting reused for longer lists like the reader's 16-entry hyphenation language
+     picker, which would otherwise render as one very tall unscrollable popup. */
+  max-height: min(320px, 60vh);
+  overflow-y: auto;
+}
+.sort-menu-option {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  padding: .62rem .75rem;
+  border-radius: 10px;
+  font-size: .85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+}
+.sort-menu-option:hover,
+.sort-menu-option:focus-visible {
+  background: var(--color-surface2);
+  outline: none;
+}
+.sort-menu-option.active {
+  background: rgba(233,69,96,.1);
+  color: var(--color-accent);
+  font-weight: 700;
+}
+.sort-menu-check {
+  opacity: 0;
+  color: currentColor;
+}
+.sort-menu-option.active .sort-menu-check {
+  opacity: 1;
+}
+
+@media (max-width: 768px) {
+  /* Switch to grid: search spans all 3 columns, sort/edit/upload get one each.
+     Avoids Chrome 74 flex-wrap + flex-basis bugs that collapse sort to 0px. */
+  .library-toolbar-controls {
+    display: grid !important;
+    grid-template-columns: 1fr auto 1fr 1fr;
+    gap: .5rem;
+    width: 100%;
+    align-items: stretch;
+  }
+  .library-toolbar-controls .density-toggle {
+    align-self: center;
+  }
+  .library-toolbar-controls .search-wrap {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .library-toolbar-controls #search-input {
+    width: 100%;
+    min-width: 0;
+  }
+  .library-toolbar-controls .sort-menu-wrap,
+  .library-toolbar-controls #edit-mode-btn,
+  .library-toolbar-controls .upload-menu-wrap {
+    min-width: 0;
+  }
+  .library-toolbar-controls #edit-mode-btn,
+  .library-toolbar-controls .upload-menu-wrap > #upload-btn {
+    width: 100%;
+    justify-content: center;
+  }
+  .sort-menu-btn {
+    width: 100%;
+    justify-content: center;
+    padding: .48rem .5rem;
+    gap: .35rem;
+  }
+  #sort-menu-label { flex: 1; text-align: center; }
+  .upload-btn-label { display: none; }
+  .sort-menu-list {
+    left: 0;
+    right: auto;
+    min-width: 260px;
+    min-width: min(78vw, 260px);
+    max-width: calc(100vw - 1rem);
+  }
+}
+
+/* ── Edit mode ───────────────────────────────────────────────────────────── */
+.book-card-checkbox-wrap {
+  display: none;
+  position: absolute;
+  top: .4rem;
+  left: .4rem;
+  z-index: 10;
+  background: rgba(0,0,0,.4);
+  border-radius: 4px;
+  padding: .15rem;
+  cursor: pointer;
+}
+.book-grid.edit-mode .book-card-checkbox-wrap { display: flex; }
+.book-card.selected { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.book-card-checkbox { width: 1rem; height: 1rem; accent-color: var(--color-accent); cursor: pointer; }
+
+.edit-toolbar {
+  position: sticky;
+  bottom: 0;
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  padding: .6rem 1rem;
+  display: flex;
+  gap: .6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  z-index: 50;
+  margin: 0 -1.5rem;
+}
+.edit-count { font-size: .85rem; color: var(--color-text-muted); margin-right: .25rem; }
+.btn-sm { padding: .3rem .75rem; font-size: .82rem; }
+
+/* ── SPA panels ──────────────────────────────────────────────────────────── */
+/* Hidden panels take no space at all */
+.app-panel[hidden] { display: none !important; }
+/* OPDS panel needs flex layout and no padding */
+#panel-opds:not([hidden]) { display: flex; flex: 1; overflow: hidden; }
+/* When OPDS panel is active, the app-body must not overflow (catalog scrolls internally) */
+.app-body.opds-active { overflow: hidden; }
+
+/* ── OPDS layout ─────────────────────────────────────────────────────────── */
+.opds-layout {
+  display: flex; gap: 0; flex: 1; overflow: hidden;
+}
+.opds-sidebar {
+  width: 210px; flex-shrink: 0; border-right: 1px solid var(--color-border);
+  display: flex; flex-direction: column; background: var(--color-surface); overflow: hidden;
+  /* On mobile this becomes a position:fixed, top:0/left:0 off-canvas drawer (see the @media
+     block below), which — unlike the normal in-flow desktop sidebar — sits outside the page's
+     usual safe-area-aware header and would otherwise render flush under the iOS status bar (and,
+     in landscape, under the notch cutout on the left edge). Matches .app-sidebar's own
+     unconditional top/left padding (~line 968-969): harmless on desktop/non-notched screens since
+     --sat/--sal are 0px there. Shared by both OPDS and BookOrbit (BookOrbit reuses this exact
+     class), so this one rule fixes both panels' drawers. */
+  padding-top: var(--sat, env(safe-area-inset-top, 0px));
+  padding-left: var(--sal, env(safe-area-inset-left, 0px));
+}
+.opds-sidebar-header {
+  padding: .75rem 1rem; border-bottom: 1px solid var(--color-border);
+  font-weight: 600; font-size: .85rem; display: flex; justify-content: space-between; align-items: center;
+}
+/* Sized to content (not flex:1) so the folder tree below it starts right after the last
+   server, not halfway down the sidebar — max-height + its own scroll caps it if there are many
+   servers. Mirrors .bookorbit-nav (fixed list) vs #bookorbit-sublist (flex:1, gets the rest). */
+#server-list { flex-shrink: 0; max-height: 240px; overflow-y: auto; padding: .4rem; }
+#server-empty { padding: 1rem; font-size: .8rem; color: var(--color-text-muted); text-align: center; }
+.server-btn {
+  display: block; width: 100%; text-align: left; padding: .6rem .75rem;
+  border: none; border-radius: 6px; background: none; cursor: pointer;
+  color: var(--color-text); margin-bottom: 2px; transition: background .15s;
+}
+.server-btn:hover { background: var(--color-surface2); }
+.server-btn.active { background: var(--color-accent); color: #fff; }
+.server-btn.active .server-url { color: rgba(255,255,255,.7); }
+/* Reachability dot — computed for every server via GET /opds/health, independent of which one
+   is currently selected/active (unlike the old click-derived connected/error state it replaces). */
+.server-btn.reachable .server-name::before,
+.server-btn.unreachable .server-name::before {
+  content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: .4rem; vertical-align: middle;
+}
+.server-btn.reachable .server-name::before { background: #2a9d4a; }
+.server-btn.unreachable .server-name::before { background: #c0392b; }
+.sidebar-layout[data-lib-theme="eink"] .server-btn.reachable .server-name::before,
+.sidebar-layout[data-lib-theme="eink"] .server-btn.unreachable .server-name::before { background: currentColor; }
+.server-name { display: block; font-size: .875rem; font-weight: 500; }
+.server-url { display: block; font-size: .72rem; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opds-catalog {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  /* Matches .opds-sidebar's own safe-area padding-top (~line 2512) — without it, the sidebar's
+     header text sits safely below a top cutout/status-bar overlay while the catalog toolbar next
+     to it has no such offset and starts flush at the very top, so its title/breadcrumb text can
+     get obscured on devices that report a non-zero safe-area-inset-top even outside the mobile
+     off-canvas layout (seen on an older Android tablet in landscape). Shared by BookOrbit too. */
+  padding-top: var(--sat, env(safe-area-inset-top, 0px));
+}
+.opds-toolbar {
+  display: flex; align-items: center; gap: .5rem; padding: .6rem 1rem;
+  border-bottom: 1px solid var(--color-border); background: var(--color-surface); flex-shrink: 0;
+  /* Without this, the row's height is whatever its tallest child needs — hiding the (taller)
+     sort select on the "Book Search" section shrinks the row, which shifts the search row
+     below it upward. Locking a min-height keeps everything below in place either way. */
+  min-height: 2.35rem;
+}
+#catalog-title { font-weight: 600; font-size: .9rem; margin-right: .25rem; flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#breadcrumb {
+  flex: 1; font-size: .78rem; color: var(--color-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.crumb-btn { background: none; border: none; cursor: pointer; color: var(--color-accent); font-size: .78rem; padding: 0; }
+.crumb-btn:hover { text-decoration: underline; }
+.crumb-sep { color: var(--color-text-muted); }
+.crumb-current { color: var(--color-text); }
+.opds-search-row {
+  display: flex; gap: .4rem; padding: .5rem 1rem;
+  border-bottom: 1px solid var(--color-border); background: var(--color-surface); flex-shrink: 0;
+}
+/* #bookorbit-search-row (this class's other user) toggles its own hidden attribute per section
+   (selectSection); OPDS's own search row never does, so this only ever mattered for BookOrbit —
+   same [hidden]-vs-own-display gotcha as the pagination/grid fixes above. */
+#bookorbit-search-row[hidden] { display: none; }
+#catalog-search { flex: 1; }
+#catalog-grid {
+  flex: 1; overflow-y: auto; padding: .75rem 1rem;
+  display: flex; flex-direction: column; gap: .5rem;
+}
+.nav-tile-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: .6rem; margin-bottom: .5rem; flex-shrink: 0;
+}
+.nav-tile {
+  display: flex; flex-direction: column; align-items: center; gap: .35rem;
+  padding: .75rem .5rem; background: var(--color-surface); border: 1px solid var(--color-border);
+  border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; color: var(--color-text);
+}
+.nav-tile:hover { border-color: var(--color-accent); background: var(--color-surface2); }
+.nav-tile-icon, .nav-tile > .nav-icon { font-size: 1.8rem; line-height: 1; }
+.nav-tile-label { font-size: .78rem; font-weight: 600; text-align: center; line-height: 1.3; }
+/* Book-count badge overlaid on a tile's folder icon (BookOrbit's Libraries/Smart Scopes/
+   Collections/Series/Authors tiles — OPDS folders don't carry a count, so this simply never
+   renders there). Same small-corner-badge idiom as .book-offline-badge. */
+.nav-tile-icon-wrap { position: relative; display: inline-flex; }
+.nav-tile-count {
+  position: absolute; top: -6px; right: -8px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  background: var(--color-accent); color: #fff;
+  font-size: .65rem; font-weight: 700; line-height: 1;
+  border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+}
+html[data-lib-theme="eink"] .nav-tile-count,
+.sidebar-layout[data-lib-theme="eink"] .nav-tile-count { background: #111; }
+#catalog-loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; color: var(--color-text-muted); }
+#catalog-empty { padding: 2rem; color: var(--color-text-muted); text-align: center; }
+#opds-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .75rem;
+  padding: .5rem 1rem;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+/* Same [hidden]-vs-own-display-rule gotcha as .opds-welcome above — an ID rule's own `display`
+   outranks the UA stylesheet's default `[hidden]{display:none}`, so toggling .hidden alone did
+   nothing: the pagination bar (and its now-stale prev/next buttons) stayed visible. */
+#opds-pagination[hidden] { display: none; }
+.opds-page-btn {
+  padding: .3rem .8rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: .85rem;
+}
+.opds-page-btn:disabled { opacity: .4; cursor: default; }
+.opds-page-btn:not(:disabled):hover { background: var(--color-bg-hover); }
+.opds-page-info { font-size: .85rem; color: var(--color-text-muted); }
+.opds-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--color-text-muted); gap: .5rem; }
+.opds-welcome .icon { font-size: 3rem; }
+/* .opds-welcome's own `display:flex` above is an author rule and outranks the UA stylesheet's
+   default `[hidden]{display:none}`, so toggling the hidden attribute alone did nothing — the
+   welcome message and the nav-tiles/book-grid it's supposed to be replaced by rendered at the
+   same time. Same fix applied to the other two persistent catalog-grid children. */
+.opds-welcome[hidden] { display: none; }
+#opds-nav-tiles[hidden] { display: none; }
+#opds-book-grid[hidden] { display: none; }
+
+/* ── OPDS folder tree (left sidebar, below the server list) ────────────────
+   Mirrors #bookorbit-sublist/.bookorbit-sublist-* exactly, since it's the same "nav list with
+   an inline sync button per row" idea — the one difference is real depth: OPDS folders nest, so
+   each row gets a `data-depth`-driven indent instead of being a flat single-level list. */
+#opds-folder-tree { flex: 1; overflow-y: auto; padding: .4rem; border-top: 1px solid var(--color-border); }
+.opds-tree-row { display: flex; align-items: center; gap: 2px; margin-bottom: 2px; }
+.opds-tree-item {
+  display: flex; align-items: center; gap: .4rem; flex: 1; min-width: 0; text-align: left; padding: .45rem .6rem;
+  border: none; border-radius: 6px; background: none; cursor: pointer;
+  color: var(--color-text); font-size: .8rem; transition: background .15s;
+}
+.opds-tree-item:hover { background: var(--color-surface2); }
+.opds-tree-item.active { background: var(--color-accent); color: #fff; }
+.opds-tree-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opds-tree-sync-btn {
+  flex-shrink: 0; border: none; background: none; cursor: pointer; border-radius: 6px;
+  padding: .3rem .45rem; color: var(--color-text-muted); font-size: .85rem; transition: background .15s, color .15s;
+}
+.opds-tree-sync-btn:hover { background: var(--color-surface2); color: var(--color-accent); }
+
+/* ── OPDS book-card grid (right pane, below any folder tiles) ──────────────
+   Sizing comes entirely from the shared .book-grid/.density-* classes (main.css ~line 601 and
+   public/js/library.js's applyGridDensity) — kept off this id rule for the same reason
+   #bookorbit-grid keeps it off (~line 2686 below): so it can't out-specificity the density
+   classes and end up a different card size than the main library/BookOrbit grids. This element
+   is static (present from page load, see public/index.html) rather than rebuilt per navigation,
+   so the density class applied to it survives each innerHTML replacement of its card children. */
+#opds-book-grid { align-content: start; }
+.opds-card { display: flex; flex-direction: column; min-width: 0; }
+.opds-card-cover-wrap { position: relative; }
+.opds-card-cover {
+  width: 100%; aspect-ratio: 2 / 3; border-radius: 6px; object-fit: cover; display: block;
+  background: var(--color-surface2); box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.opds-card-cover-ph { display: flex; align-items: center; justify-content: center; font-size: 2rem; opacity: .5; }
+.opds-card-info { padding: .6rem .75rem .75rem; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .3rem; }
+.opds-card-title {
+  font-size: .82rem; font-weight: 600; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.opds-card-author { font-size: .74rem; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opds-card-actions {
+  display: none; position: absolute; top: .4rem; right: .4rem; left: .4rem; gap: .3rem;
+  flex-wrap: wrap; justify-content: flex-end;
+}
+.opds-card-cover-wrap:hover .opds-card-actions,
+.opds-card.tapped .opds-card-actions { display: flex; }
+.opds-card-actions .btn-icon {
+  /* Matches .book-card-actions .btn-icon's accent background (~line 725) — translucent black
+     was nearly invisible over an already-dark cover. */
+  background: rgba(233, 69, 96, 0.9); color: #fff; border-color: rgba(255, 255, 255, 0.5);
+  width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center;
+  font-size: .95rem;
+}
+.opds-card-actions .btn-icon:hover { background: rgba(160, 20, 50, 0.95); border-color: rgba(255, 255, 255, 0.7); color: #fff; }
+.opds-card-actions .btn-icon:disabled { opacity: .5; cursor: default; }
+.opds-card-actions .btn-icon:disabled:hover { background: rgba(233, 69, 96, 0.9); border-color: rgba(255, 255, 255, 0.5); }
+.opds-card-actions .btn-icon .nav-icon { filter: brightness(0) invert(1); width: 16px; height: 16px; }
+.opds-card-actions .btn-icon.opds-btn-busy { opacity: .6; }
+html[data-lib-theme="eink"] .opds-card-actions .btn-icon,
+.sidebar-layout[data-lib-theme="eink"] .opds-card-actions .btn-icon {
+  background: rgba(255, 255, 255, 0.92); color: #111; border-color: rgba(0, 0, 0, 0.55);
+}
+html[data-lib-theme="eink"] .opds-card-actions .btn-icon .nav-icon,
+.sidebar-layout[data-lib-theme="eink"] .opds-card-actions .btn-icon .nav-icon { filter: none; }
+
+/* Always-visible peek icon, bottom-right of the cover — mirrors .bookorbit-card-peek-btn (and
+   ultimately .book-card-peek-btn) exactly. */
+.opds-card-peek-btn {
+  position: absolute; bottom: 5px; right: 5px;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: rgba(233, 69, 96, 0.9); border: 1px solid rgba(255, 255, 255, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity .15s; z-index: 2; text-decoration: none;
+}
+.opds-card-peek-btn .nav-icon { width: 14px; height: 14px; }
+.opds-card-cover-wrap:hover .opds-card-peek-btn,
+.opds-card.tapped .opds-card-peek-btn { opacity: 1; }
+.opds-card-cover-wrap:hover .opds-card-peek-btn.opds-btn-busy,
+.opds-card.tapped .opds-card-peek-btn.opds-btn-busy { opacity: .6; }
+.opds-card-peek-btn:disabled { cursor: default; }
+html[data-lib-theme="eink"] .opds-card-peek-btn,
+.sidebar-layout[data-lib-theme="eink"] .opds-card-peek-btn {
+  background: rgba(255, 255, 255, 0.90); border-color: rgba(0, 0, 0, 0.55);
+}
+
+/* Series-number badge, bottom-left of the cover — mirrors .book-series-badge (main.css ~2124)
+   exactly, opposite corner from the peek button. */
+.opds-card-series-badge {
+  position: absolute; bottom: 6px; left: 6px;
+  padding: .15rem .45rem; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff; font-size: .72rem; font-weight: 700; line-height: 1.3;
+  z-index: 2; pointer-events: none;
+}
+html[data-lib-theme="eink"] .opds-card-series-badge,
+.sidebar-layout[data-lib-theme="eink"] .opds-card-series-badge {
+  background: rgba(255, 255, 255, 0.85); color: #111;
+}
+
+/* Drawer toggle/close controls only exist for the off-canvas mobile layout — inert on desktop,
+   where .opds-sidebar is always visible inline (see the @media block below). Mirrors BookOrbit's
+   drawer controls exactly (~line 2830). */
+.opds-drawer-toggle-btn {
+  display: none; flex-shrink: 0; border: none; background: none; cursor: pointer;
+  font-size: 1.1rem; padding: .3rem .5rem; color: var(--color-text); border-radius: 6px;
+}
+.opds-drawer-toggle-btn:hover { background: var(--color-surface2); }
+.opds-drawer-close-btn {
+  display: none; border: none; background: none; cursor: pointer; font-size: 1.3rem;
+  line-height: 1; color: var(--color-text-muted); padding: 0 .25rem;
+}
+#opds-drawer-overlay { display: none; }
+
+@media (max-width: 768px) {
+  .app-body.opds-active { overflow-x: hidden; overflow-y: auto; }
+  #panel-opds:not([hidden]) { overflow-x: hidden; overflow-y: auto; }
+  /* .opds-layout's base rule (~line 2496) is overflow:hidden, sized for the desktop
+     internally-scrolling pane. Left un-overridden, it still clips anything taller than the
+     viewport at its own box — including the pagination bar after the book grid — even though
+     .opds-catalog/#catalog-grid below were already switched to overflow:visible for mobile's
+     page-level scroll. */
+  .opds-layout { overflow-x: hidden; overflow-y: visible; }
+  .opds-catalog { overflow-x: hidden; overflow-y: visible; min-width: 0; max-width: 100%; }
+  #catalog-grid { overflow: visible; min-width: 0; }
+  #opds-book-grid { overflow: visible; min-width: 0; } /* column sizing comes from .book-grid/.density-* */
+  #catalog-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
+  .nav-tile-grid { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); }
+  .opds-toolbar { flex-wrap: wrap; gap: .35rem; }
+  #opds-pagination { flex-wrap: wrap; gap: .4rem; padding: .4rem .75rem; }
+
+  /* Off-canvas drawer for the server list + folder tree, replacing the old "always stacked
+     above the catalog" layout — mirrors BookOrbit's panel (~line 2900). */
+  .opds-drawer-toggle-btn { display: inline-flex; align-items: center; justify-content: center; }
+  #panel-opds .opds-sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 210;
+    width: 85%; max-width: 320px; height: 100%;
+    transform: translateX(-100%);
+    transition: transform .25s ease;
+    box-shadow: 2px 0 12px rgba(0,0,0,.3);
+  }
+  #panel-opds .opds-sidebar.opds-drawer-open { transform: translateX(0); }
+  .opds-drawer-close-btn { display: inline-block; }
+  #opds-drawer-overlay {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    background: rgba(0,0,0,.5); z-index: 205;
+  }
+  #opds-drawer-overlay.visible { display: block; }
+}
+@media (max-width: 480px) {
+  .btn-add .btn-add-label { display: none; }
+  .btn-add::after { content: '+'; font-size: 1.2rem; font-weight: 700; line-height: 1; }
+  .btn-add { padding: .3rem .6rem; }
+}
+
+/* ── BookOrbit browser panel (reuses .opds-layout/.opds-sidebar/.opds-catalog/
+   .opds-toolbar/.opds-search-row/.opds-welcome/.opds-page-btn/.opds-page-info) ── */
+#panel-bookorbit:not([hidden]) { display: flex; flex: 1; overflow: hidden; }
+.app-body.bookorbit-active { overflow: hidden; }
+
+/* Title fills/yields all available space (grows into empty space when no library is selected,
+   shrinks+ellipsizes for long names) while the select holds a fixed compact size and never
+   wraps to its own line — no flex-wrap here, on purpose (see .opds-toolbar). */
+#bookorbit-title { font-weight: 600; font-size: .9rem; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Same checkmark dropdown as the main library grid (.sort-menu-wrap/.sort-menu-btn/etc., see
+   ~line 2281) — floors at .sort-menu-wrap's own 160px min-width so it doesn't get squeezed by
+   the title/density-toggle competing for space in this tightly-packed toolbar row, but (unlike
+   an earlier max-width cap here) is otherwise free to grow to fit longer option labels (e.g.
+   "Default (server order)") on one line when the toolbar has room. */
+.bookorbit-sort-menu-wrap { flex-shrink: 0; min-width: 160px; }
+.bookorbit-nav { padding: .4rem; display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.bookorbit-nav-item {
+  display: block; width: 100%; text-align: left; padding: .55rem .75rem;
+  border: none; border-radius: 6px; background: none; cursor: pointer;
+  color: var(--color-text); font-size: .85rem; transition: background .15s;
+}
+.bookorbit-nav-item:hover { background: var(--color-surface2); }
+.bookorbit-nav-item.active { background: var(--color-accent); color: #fff; }
+
+#bookorbit-sublist { flex: 1; overflow-y: auto; padding: .4rem; border-top: 1px solid var(--color-border); }
+.bookorbit-sublist-row { display: flex; align-items: center; gap: 2px; margin-bottom: 2px; }
+.bookorbit-sublist-item {
+  display: flex; align-items: center; gap: .4rem; flex: 1; min-width: 0; text-align: left; padding: .45rem .6rem;
+  border: none; border-radius: 6px; background: none; cursor: pointer;
+  color: var(--color-text); font-size: .8rem; transition: background .15s;
+}
+.bookorbit-sublist-item:hover { background: var(--color-surface2); }
+.bookorbit-sublist-item.active { background: var(--color-accent); color: #fff; }
+.bookorbit-sublist-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bookorbit-sublist-count { flex-shrink: 0; font-size: .72rem; opacity: .7; }
+.bookorbit-sublist-sync-btn {
+  flex-shrink: 0; border: none; background: none; cursor: pointer; border-radius: 6px;
+  padding: .3rem .45rem; color: var(--color-text-muted); font-size: .85rem; transition: background .15s, color .15s;
+}
+.bookorbit-sublist-sync-btn:hover { background: var(--color-surface2); color: var(--color-accent); }
+.bookorbit-sublist-pager {
+  display: flex; align-items: center; justify-content: center; gap: .5rem;
+  padding: .5rem 0 .2rem;
+}
+.bookorbit-sublist-pager .opds-page-btn { padding: .2rem .55rem; }
+.bookorbit-sublist-pager .opds-page-info { font-size: .76rem; }
+
+/* Sizing (grid-template-columns/gap) comes entirely from the shared .book-grid/.density-* classes
+   (see main.css ~line 601 and public/js/library.js's applyGridDensity) — kept off this id rule so
+   it can't out-specificity the density classes and end up a different card size than everywhere
+   else in the app. */
+#bookorbit-grid {
+  flex: 1; overflow-y: auto; padding: .75rem 1rem;
+  align-content: start;
+}
+/* setLoading() toggles gridEl.hidden — without this, the shared .book-grid class's own
+   display:grid (higher specificity than the UA stylesheet's default [hidden]{display:none})
+   would keep it visible regardless. Harmless in practice today (loadBooks immediately clears
+   .innerHTML right after), but a real footgun for any future code path that relies on this. */
+#bookorbit-grid[hidden] { display: none; }
+/* NOT overflow:hidden here — BookOrbit's panel is a bounded, internally-scrolling layout
+   (unlike the main library grid, which lives in an unbounded page-scroll context where
+   .book-card can safely use overflow:hidden). overflow:hidden zeroes a box's "automatic
+   minimum size" for BOTH axes it applies to (CSS sizing spec) — on this bounded layout that
+   let the grid row shrink the card below its real content height, clipping the cover.
+   min-width:0 fixes the mobile-compact width-overflow problem instead (a long nowrap
+   author/series name inflating THIS grid item's own min-content width past its 1fr share,
+   which pushed/ballooned columns on the fixed 3-column mobile layout) — it only overrides
+   the width axis's automatic minimum, not height, so row sizing is unaffected. Must be on
+   the grid item itself (.bookorbit-card) — a descendant's min-width:0 (.bookorbit-card-info
+   below) isn't enough, since grid track sizing reads the item's own minimum. */
+.bookorbit-card { display: flex; flex-direction: column; min-width: 0; }
+/* The wrapper only positions the hover-action overlay + downloaded badge — it must NOT carry
+   aspect-ratio/overflow:hidden itself. A plain (non-replaced) box with aspect-ratio, sitting as
+   a flex item with an otherwise-ambiguous "auto" main size, has its automatic content size
+   resolve to 0 when overflow isn't visible — the ratio is accepted by the cascade but never
+   produces a height. Putting aspect-ratio on the <img>/placeholder instead (a replaced element,
+   like .book-cover in main.css ~639) sizes reliably; the wrapper then just sizes to match it. */
+.bookorbit-card-cover-wrap { position: relative; }
+.bookorbit-card-cover {
+  width: 100%; aspect-ratio: 2 / 3; border-radius: 6px; object-fit: cover; display: block;
+  background: var(--color-surface2); box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.bookorbit-card-cover-ph { display: flex; align-items: center; justify-content: center; font-size: 2rem; opacity: .5; }
+/* Padded text block below the cover — mirrors .book-info (main.css ~655) so cards get the
+   same breathing room as the main library grid instead of text sitting flush against the
+   cover edge and the next row. */
+.bookorbit-card-info {
+  padding: .6rem .75rem .75rem;
+  flex: 1;
+  min-width: 0; /* lets long nowrap author/series text shrink instead of inflating the card's width */
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+}
+.bookorbit-card-title {
+  font-size: .82rem; font-weight: 600; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.bookorbit-card-author { font-size: .74rem; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bookorbit-card-series { font-size: .72rem; color: var(--color-accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Icon-only action buttons overlaid on the cover — hover to reveal (desktop) or tap the card
+   once (touch, via .tapped — see bookorbit.js), matching public/js/library.js's card actions
+   instead of taking a separate row of text buttons below every card. */
+.bookorbit-card-actions {
+  display: none; position: absolute; top: .4rem; right: .4rem; left: .4rem; gap: .3rem;
+  /* Compact density can be too narrow to fit every icon in one row — wrap to a second row,
+     right-aligned, instead of overflowing past the cover. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.bookorbit-card-cover-wrap:hover .bookorbit-card-actions,
+.bookorbit-card.tapped .bookorbit-card-actions { display: flex; }
+.bookorbit-card-actions .btn-icon {
+  /* Matches .book-card-actions .btn-icon's accent background (~line 725) — translucent black
+     was nearly invisible over an already-dark cover. */
+  background: rgba(233, 69, 96, 0.9); color: #fff; border-color: rgba(255, 255, 255, 0.5);
+  width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center;
+  font-size: .95rem;
+}
+.bookorbit-card-actions .btn-icon:hover { background: rgba(160, 20, 50, 0.95); border-color: rgba(255, 255, 255, 0.7); color: #fff; }
+.bookorbit-card-actions .btn-icon:disabled { opacity: .5; cursor: default; }
+.bookorbit-card-actions .btn-icon:disabled:hover { background: rgba(233, 69, 96, 0.9); border-color: rgba(255, 255, 255, 0.5); }
+.bookorbit-card-actions .btn-icon .nav-icon { filter: brightness(0) invert(1); width: 16px; height: 16px; }
+.bookorbit-card-actions .btn-icon.bookorbit-btn-busy { opacity: .6; }
+html[data-lib-theme="eink"] .bookorbit-card-actions .btn-icon,
+.sidebar-layout[data-lib-theme="eink"] .bookorbit-card-actions .btn-icon {
+  background: rgba(255, 255, 255, 0.92); color: #111; border-color: rgba(0, 0, 0, 0.55);
+}
+html[data-lib-theme="eink"] .bookorbit-card-actions .btn-icon .nav-icon,
+.sidebar-layout[data-lib-theme="eink"] .bookorbit-card-actions .btn-icon .nav-icon { filter: none; }
+
+/* Always-visible peek icon, bottom-right of the cover — separate from the top-right hover-action
+   row so a 4th top icon (peek for not-yet-owned books) doesn't overflow the cover. Mirrors
+   .book-card-peek-btn (main.css ~1975) exactly. */
+.bookorbit-card-peek-btn {
+  position: absolute; bottom: 5px; right: 5px;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: rgba(233, 69, 96, 0.9); border: 1px solid rgba(255, 255, 255, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity .15s; z-index: 2; text-decoration: none;
+}
+.bookorbit-card-peek-btn .nav-icon { width: 14px; height: 14px; }
+.bookorbit-card-peek-btn:disabled { cursor: default; }
+.bookorbit-card-cover-wrap:hover .bookorbit-card-peek-btn,
+.bookorbit-card.tapped .bookorbit-card-peek-btn { opacity: 1; }
+.bookorbit-card-cover-wrap:hover .bookorbit-card-peek-btn.bookorbit-btn-busy,
+.bookorbit-card.tapped .bookorbit-card-peek-btn.bookorbit-btn-busy { opacity: .6; }
+html[data-lib-theme="eink"] .bookorbit-card-peek-btn,
+.sidebar-layout[data-lib-theme="eink"] .bookorbit-card-peek-btn {
+  background: rgba(255, 255, 255, 0.90); border-color: rgba(0, 0, 0, 0.55);
+}
+
+/* Series-number badge, bottom-left of the cover — mirrors .book-series-badge (main.css ~2124)
+   exactly, opposite corner from the peek button. */
+.bookorbit-card-series-badge {
+  position: absolute; bottom: 6px; left: 6px;
+  padding: .15rem .45rem; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff; font-size: .72rem; font-weight: 700; line-height: 1.3;
+  z-index: 2; pointer-events: none;
+}
+html[data-lib-theme="eink"] .bookorbit-card-series-badge,
+.sidebar-layout[data-lib-theme="eink"] .bookorbit-card-series-badge {
+  background: rgba(255, 255, 255, 0.85); color: #111;
+}
+
+#bookorbit-loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; color: var(--color-text-muted); }
+#bookorbit-empty { padding: 2rem; color: var(--color-text-muted); text-align: center; }
+#bookorbit-pagination {
+  display: flex; align-items: center; justify-content: center; gap: .75rem;
+  padding: .5rem 1rem; border-top: 1px solid var(--color-border); flex-shrink: 0;
+}
+/* This is the actual bug: selectSection() sets paginationEl.hidden = true when switching
+   sections, but this rule's own `display` (higher-specificity author rule) overrode the UA
+   stylesheet's default [hidden]{display:none}, so the bar — and its now-stale prev/next buttons
+   from whatever book list was last shown — stayed visible and out of sync with the new section. */
+#bookorbit-pagination[hidden] { display: none; }
+
+/* Drawer toggle/close controls only exist for the off-canvas mobile layout — inert on desktop,
+   where .opds-sidebar is always visible inline (see the @media block below). */
+.bookorbit-drawer-toggle-btn {
+  display: none; flex-shrink: 0; border: none; background: none; cursor: pointer;
+  font-size: 1.1rem; padding: .3rem .5rem; color: var(--color-text); border-radius: 6px;
+}
+.bookorbit-drawer-toggle-btn:hover { background: var(--color-surface2); }
+.bookorbit-drawer-close-btn {
+  display: none; border: none; background: none; cursor: pointer; font-size: 1.3rem;
+  line-height: 1; color: var(--color-text-muted); padding: 0 .25rem;
+}
+#bookorbit-drawer-overlay { display: none; }
+
+@media (max-width: 768px) {
+  .app-body.bookorbit-active { overflow-x: hidden; overflow-y: auto; }
+  #panel-bookorbit:not([hidden]) { overflow-x: hidden; overflow-y: auto; }
+  /* Mirrors OPDS's own mobile overrides (~line 2736/2740) — .opds-layout/.opds-catalog are
+     shared classes whose base rules (~line 2496/2541) are both overflow:hidden, sized for the
+     desktop internally-scrolling pane. Without these, #bookorbit-grid's own overflow:visible
+     below is clipped one/two levels up anyway, hiding anything past the viewport height —
+     including the pagination bar after the book grid. */
+  .opds-layout { overflow-x: hidden; overflow-y: visible; }
+  .opds-catalog { overflow-x: hidden; overflow-y: visible; min-width: 0; max-width: 100%; }
+  /* min-width:0 lets the grid shrink below its content's min-content width — without it,
+     a flex child defaults to min-width:auto and the compact 3-column layout overflows
+     instead of shrinking, clipping the last card (mirrors #catalog-grid's fix above). */
+  #bookorbit-grid { overflow: visible; min-width: 0; } /* column sizing comes from .book-grid/.density-* — see ~2647 */
+  #bookorbit-pagination { flex-wrap: wrap; gap: .4rem; padding: .4rem .75rem; }
+
+  /* The sidebar (section nav + sublist) used to permanently stack above the grid, leaving only
+     a sliver of screen for actual books. It's now an off-canvas drawer instead: hidden by
+     default, opened via the toolbar's ☰ button, and auto-closed the moment a library/collection/
+     series/author is picked so the book grid gets the full screen right away. */
+  .bookorbit-drawer-toggle-btn { display: inline-flex; align-items: center; justify-content: center; }
+  #panel-bookorbit .opds-sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 210;
+    width: 85%; max-width: 320px; height: 100%;
+    transform: translateX(-100%);
+    transition: transform .25s ease;
+    box-shadow: 2px 0 12px rgba(0,0,0,.3);
+  }
+  #panel-bookorbit .opds-sidebar.bookorbit-drawer-open { transform: translateX(0); }
+  .bookorbit-drawer-close-btn { display: inline-block; }
+  #bookorbit-drawer-overlay {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    background: rgba(0,0,0,.5); z-index: 205;
+  }
+  #bookorbit-drawer-overlay.visible { display: block; }
+}
+
+/* ── Settings tabs — one tab-panel visible at a time instead of one long scroll.
+   Horizontally scrollable with a hidden scrollbar so it stays usable on narrow/mobile
+   screens (same pattern as the book-info modal's .info-modal-tabs/.imt-tab). ── */
+.settings-tabs {
+  display: flex; overflow-x: auto; scrollbar-width: none;
+  border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; gap: 0;
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tab {
+  flex-shrink: 0; background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--color-text-muted); cursor: pointer; font-size: .9rem; font-weight: 600;
+  padding: .65rem 1.1rem; transition: color .15s, border-color .15s;
+  white-space: nowrap; margin-bottom: -1px;
+}
+.settings-tab:hover { color: var(--color-text); }
+.settings-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+
+/* ── Settings cards ───────────────────────────────────────────────────────── */
+.settings-card {
+  background: var(--color-surface); border: 1px solid var(--color-border);
+  border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem; max-width: 640px;
+}
+.settings-card h2 { font-size: 1rem; font-weight: 600; margin: 0 0 1.25rem; color: var(--color-text); }
+.settings-card h2 .badge {
+  display: inline-block; font-size: .7rem; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; padding: .15rem .45rem; border-radius: 4px; margin-left: .5rem;
+  vertical-align: middle; background: var(--color-surface2); color: var(--color-text-muted);
+}
+#panel-settings .form-group { margin-bottom: 1rem; }
+#panel-settings .form-group label {
+  display: block; font-size: .8rem; font-weight: 500; margin-bottom: .35rem; color: var(--color-text-muted);
+}
+#panel-settings .form-group input { width: 100%; box-sizing: border-box; }
+.kosync-status { display: inline-block; font-size: .75rem; font-weight: 600; padding: .2rem .6rem; border-radius: 20px; margin-bottom: 1rem; }
+.kosync-status:empty { display: none; }
+.status-ok    { background: #1a472a; color: #4ade80; }
+.status-error { background: #4a1a1a; color: #f87171; }
+.status-off   { background: var(--color-surface2); color: var(--color-text-muted); }
+.card-actions { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: 1.25rem; }
+.kosync-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .6rem; }
+.kosync-actions .btn { width: 100%; justify-content: center; min-width: 0; }
+.settings-hint { font-size: .78rem; color: var(--color-text-muted); margin-top: -.5rem; margin-bottom: 1rem; line-height: 1.5; }
+.section-divider { border: none; border-top: 1px solid var(--color-border); margin: 1.5rem 0; }
+.kosync-info-box {
+  background: var(--color-surface2); border-radius: 6px; padding: .75rem 1rem;
+  font-size: .8rem; color: var(--color-text-muted); margin-bottom: 1.25rem; line-height: 1.6;
+}
+.kosync-info-box code { background: var(--color-bg); padding: .1rem .3rem; border-radius: 3px; font-size: .78rem; }
+.setting-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.setting-toggle-label { font-size: .9rem; font-weight: 500; color: var(--color-text); }
+.setting-toggle-hint { font-size: .78rem; color: var(--color-text-muted); margin-top: .2rem; line-height: 1.5; }
+/* ── Dictionary preferences UI (settings page) ───────────────────────────── */
+.dict-settings-item {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .4rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.dict-settings-item:last-child { border-bottom: none; }
+.dict-settings-name {
+  display: flex;
+  flex-direction: column;
+  gap: .1rem;
+  font-size: .85rem;
+  color: var(--color-text);
+  min-width: 0;
+}
+.dict-settings-count { font-size: .72rem; color: var(--color-text-muted); }
+.dict-order-btns { display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.dict-order-btn {
+  background: var(--color-surface2);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: .8rem;
+  line-height: 1;
+  padding: 2px 5px;
+  transition: background .15s;
+}
+.dict-order-btn:hover:not(:disabled) { background: var(--color-accent); color: #fff; }
+.dict-order-btn:disabled { opacity: .3; cursor: default; }
+.dict-lang-inputs {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  flex-shrink: 0;
+}
+.dict-lang-inputs input[type="text"] {
+  width: 3.2rem;
+  padding: .15rem .3rem;
+  font-size: .78rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface2);
+  color: var(--color-text);
+  text-align: center;
+  text-transform: lowercase;
+}
+.dict-lang-sep { font-size: .75rem; color: var(--color-text-muted); }
+
+.admin-user-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .5rem 0; border-bottom: 1px solid var(--color-border); }
+.admin-user-row:last-child { border-bottom: none; }
+.admin-user-info { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.admin-user-name { font-size: .875rem; font-weight: 500; color: var(--color-text); }
+.admin-user-meta { font-size: .75rem; color: var(--color-text-muted); }
+.admin-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .35rem .75rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--color-border);
+  font-size: .82rem;
+  color: var(--color-text-secondary, var(--color-text-muted));
+  cursor: pointer;
+  user-select: none;
+}
+.admin-upload-btn:hover { background: var(--color-hover, rgba(255,255,255,.07)); }
+@media (max-width: 640px) {
+  .kosync-actions { grid-template-columns: 1fr; }
+}
+
+/* ── Toggle switch ────────────────────────────────────────────────────────── */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  background: var(--color-border);
+  border-radius: 24px;
+  cursor: pointer;
+  transition: background .2s;
+}
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .2s;
+}
+.toggle input:checked + .toggle-slider { background: var(--color-accent); }
+.toggle input:checked + .toggle-slider::before { transform: translateX(20px); }
+
+/* ── E-ink: additional overrides ─────────────────────────────────────────── */
+/* Sort / filter dropdown */
+html[data-lib-theme="eink"] .sort-select,
+.sidebar-layout[data-lib-theme="eink"] .sort-select {
+  background: #fff;
+  color: #111;
+  border-color: #111;
+}
+html[data-lib-theme="eink"] .sort-menu-btn,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-btn {
+  background: #fff;
+  color: #111;
+  border-color: #111;
+  box-shadow: none;
+}
+html[data-lib-theme="eink"] .sort-menu-btn:hover,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-btn:hover { border-color: #111; }
+html[data-lib-theme="eink"] .sort-menu-list,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-list {
+  background: #fff;
+  border-color: #111;
+  box-shadow: 0 4px 16px rgba(0,0,0,.15);
+}
+html[data-lib-theme="eink"] .sort-menu-option:hover,
+html[data-lib-theme="eink"] .sort-menu-option:focus-visible,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-option:hover,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-option:focus-visible { background: #f0f0f0; }
+/* .active's own eink rule (above, ~line 114) sets white text on a black background — this
+   plain :hover rule has the same specificity and comes later, so hovering the already-selected
+   entry left the background near-white while the text stayed white (invisible). Needs a
+   background dark enough for white text, not the light hover shade meant for unselected rows. */
+html[data-lib-theme="eink"] .sort-menu-option.active:hover,
+html[data-lib-theme="eink"] .sort-menu-option.active:focus-visible,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-option.active:hover,
+.sidebar-layout[data-lib-theme="eink"] .sort-menu-option.active:focus-visible { background: #333; }
+
+/* Language dropdown */
+html[data-lib-theme="eink"] .lang-menu-btn,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-btn {
+  background: #fff;
+  color: #111;
+  border-color: #111;
+  box-shadow: none;
+}
+html[data-lib-theme="eink"] .lang-menu-btn:hover,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-btn:hover { border-color: #111; }
+html[data-lib-theme="eink"] .lang-menu-list,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-list {
+  background: #fff;
+  border-color: #111;
+  box-shadow: 0 4px 16px rgba(0,0,0,.15);
+}
+html[data-lib-theme="eink"] .lang-menu-option:hover,
+html[data-lib-theme="eink"] .lang-menu-option:focus-visible,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-option:hover,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-option:focus-visible { background: #f0f0f0; }
+/* Same fix as .sort-menu-option.active:hover above — the plain :hover rule's light background
+   left the .active rule's white text (~line 104) invisible on the selected row. */
+html[data-lib-theme="eink"] .lang-menu-option.active:hover,
+html[data-lib-theme="eink"] .lang-menu-option.active:focus-visible,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-option.active:hover,
+.sidebar-layout[data-lib-theme="eink"] .lang-menu-option.active:focus-visible { background: #333; }
+
+/* Edit mode button (btn-secondary → white/black) */
+html[data-lib-theme="eink"] #edit-mode-btn,
+.sidebar-layout[data-lib-theme="eink"] #edit-mode-btn {
+  background: #fff;
+  color: #111;
+  border-color: #111;
+}
+
+/* Edit action buttons: select-all, assign → black like delete */
+html[data-lib-theme="eink"] #edit-select-all-btn,
+html[data-lib-theme="eink"] #edit-assign-btn,
+html[data-lib-theme="eink"] #edit-remove-btn,
+.sidebar-layout[data-lib-theme="eink"] #edit-select-all-btn,
+.sidebar-layout[data-lib-theme="eink"] #edit-assign-btn,
+.sidebar-layout[data-lib-theme="eink"] #edit-remove-btn {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+/* Online library book cover thumbnails */
+html[data-lib-theme="eink"] .opds-card-cover,
+.sidebar-layout[data-lib-theme="eink"] .opds-card-cover,
+html[data-lib-theme="eink"] .bookorbit-card-cover,
+.sidebar-layout[data-lib-theme="eink"] .bookorbit-card-cover { filter: grayscale(100%); }
+
+/* Book info: genre tags */
+html[data-lib-theme="eink"] .genre-pill,
+.sidebar-layout[data-lib-theme="eink"] .genre-pill {
+  background: #f0f0f0;
+  color: #111;
+  border-color: #aaa;
+}
+
+/* Book info: read button */
+html[data-lib-theme="eink"] .btn-read,
+.sidebar-layout[data-lib-theme="eink"] .btn-read {
+  background: #111;
+  color: #fff;
+}
+
+/* Book info / edit mode: native checkboxes */
+html[data-lib-theme="eink"] .info-modal-shelf-row input[type="checkbox"],
+html[data-lib-theme="eink"] .book-card-checkbox,
+.sidebar-layout[data-lib-theme="eink"] .info-modal-shelf-row input[type="checkbox"],
+.sidebar-layout[data-lib-theme="eink"] .book-card-checkbox { accent-color: #111; }
+
+/* No spinning animation on e-ink displays — matches .book-card's animation:none treatment
+   (~line 640). A spinning ring is wasted motion on a slow-refresh screen and can look like a
+   rendering glitch rather than a loading indicator, so hide it entirely rather than just
+   recoloring it. */
+html[data-lib-theme="eink"] .spinner,
+.sidebar-layout[data-lib-theme="eink"] .spinner { display: none; }
+
+/* ── Flexbox gap fallback (old WebView, ~Chrome 66–83) ─────────────────────────
+   Flexbox `gap` only shipped in Chrome 84, so on the tested Android WebView it's
+   ignored and icon+label / cover+meta rows collapse together. There's no reliable
+   CSS feature query for *flex* gap (grid `gap` is recognized from Chrome 66, so
+   `@supports (gap:1px)` is true on engines that still lack flex gap), so a tiny JS
+   probe in the page <head> adds `.no-flexgap` to <html> when flex gap doesn't work.
+   These rules restore the spacing with margins; modern engines never get the class
+   so their rendering is unchanged. We mirror each component's gap value here. */
+/* Horizontal rows — space subsequent ELEMENT children from the previous one. */
+html.no-flexgap .sidebar-item            > * + * { margin-left: .6rem; }
+html.no-flexgap .sidebar-shelf-item      > * + * { margin-left: .6rem; }
+html.no-flexgap .sidebar-username-row    > * + * { margin-left: .25rem; }
+html.no-flexgap .sidebar-theme           > * + * { margin-top: .4rem; }
+html.no-flexgap .opds-toolbar            > * + * { margin-left: .5rem; }
+html.no-flexgap .opds-search-row         > * + * { margin-left: .4rem; }
+html.no-flexgap .opds-shelf-banner-actions > * + * { margin-left: .4rem; }
+html.no-flexgap .imt-meta-pair           > * + * { margin-left: .35rem; }
+html.no-flexgap .info-modal-shelf-row    > * + * { margin-left: .5rem; }
+html.no-flexgap .info-modal-footer       > * + * { margin-left: .5rem; }
+html.no-flexgap .info-modal-actions      > * + * { margin-left: .3rem; }
+html.no-flexgap .lang-menu-btn           > * + * { margin-left: .45rem; }
+html.no-flexgap .upload-menu-item        > * + * { margin-left: .5rem; }
+/* Rows whose label is a bare TEXT node (no element to hang margin-left on), so the
+   leading icon gets a right margin instead. */
+html.no-flexgap .bcm-item                > :first-child { margin-right: .45rem; }
+/* Wrapping badge groups — give every child trailing right+bottom margin. */
+html.no-flexgap .info-modal-genres       > *  { margin: 0 .3rem .3rem 0; }
+/* Re-assert the auto margin that right-aligns shelf/nav counts — the generic
+   `> * + *` rule above would otherwise override it and pull the count + edit
+   button back to the left. */
+html.no-flexgap .sidebar-item       > .shelf-count,
+html.no-flexgap .sidebar-shelf-item > .shelf-count { margin-left: auto; }
+/* Vertical stacks — space subsequent children from the one above. */
+html.no-flexgap .nav-tile                > * + * { margin-top: .35rem; }
+html.no-flexgap .opds-welcome            > * + * { margin-top: .5rem; }

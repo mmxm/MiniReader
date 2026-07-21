@@ -1,0 +1,7278 @@
+import { apiFetch, requireAuth, getToken } from './api.js';
+import { toast, initSortMenuFor, resyncSortMenu } from './ui.js';
+import { t, initI18n, applyTranslations, getCurrentLang } from './i18n.js';
+import { isBookDownloaded, downloadBook, fetchOfflineBookFile, getBookMeta, saveBookMeta, removeBook } from './offline.js';
+import { queueProgress, clearProgress, flushProgressOutbox } from './progress-outbox.js';
+import { log, warn } from './logger.js';
+
+const READER_BUILD = 'br-v89-cxreader-only';
+
+const _i18nReady = initI18n();
+log('[codexa] reader build', READER_BUILD);
+
+// Module-level detection (mirrors init()'s _legacyWebView) so module-scope code can guard
+// features that break Chrome 83 Android WebView.
+const _isLegacyWv = /\bwv\b/.test(navigator.userAgent) &&
+  parseInt((/Chrome\/(\d+)/.exec(navigator.userAgent) || ['', '999'])[1]) < 90;
+
+function onTap(el, handler) {
+  if (!el) return;
+  el.addEventListener('click', handler);
+  el.addEventListener('touchend', (e) => { e.preventDefault(); handler(e); });
+}
+
+// Polyfills for Chrome <76
+if (!Promise.allSettled) {
+  Promise.allSettled = ps => Promise.all(ps.map(p =>
+    Promise.resolve(p).then(
+      value  => ({ status: 'fulfilled', value }),
+      reason => ({ status: 'rejected', reason })
+    )
+  ));
+}
+
+if (!requireAuth()) throw new Error('not authenticated');
+const params = new URLSearchParams(window.location.search);
+const isPeekMode = params.get('peek') === '1';
+const bookId = params.get('id');
+// Peeking/reading from the BookOrbit or OPDS panels (public/js/bookorbit.js, public/js/opds.js)
+// tags the reader URL so closing sends the user back to that panel (which restores its own last
+// section/item/page/server+folder — see each file's saveResumeState/restoreResumeState) instead
+// of the default library view.
+const libraryReturnUrl = params.get('from') === 'bookorbit' ? '/?panel=bookorbit'
+  : params.get('from') === 'opds' ? '/?panel=opds'
+  : '/';
+if (!bookId) { window.location.href = libraryReturnUrl; throw new Error(); }
+const BIONIC_RELOAD_KEY = 'br_bionic_reload_state_v1';
+const SESSION_KEY = 'br_interrupted_session_v1';
+const RESUME_STATE_KEY = 'br_resume_state_v1';
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BIONIC_RELOAD_MAX_AGE_MS = 5 * 60 * 1000;
+
+// ── Themes ────────────────────────────────────────────────────────────────────
+const THEMES = {
+  dark:  { bg: '#111111', text: '#e0e0e0', link: '#e94560' },
+  light: { bg: '#f9f9f6', text: '#1a1a1a', link: '#c73652' },
+  sepia: { bg: '#f1e8d0', text: '#3e2e1a', link: '#8b4513' },
+  sepiaDark: { bg: '#c4b090', text: '#2e2014', link: '#7a3a10' },
+  midnight:  { bg: '#0f172a', text: '#e2e8f0', link: '#38bdf8' },
+  nord:      { bg: '#2e3440', text: '#d8dee9', link: '#88c0d0' },
+};
+
+function hexLuminance(hex) {
+  const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
+  const lin = c => c <= 0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4);
+  return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b);
+}
+function mixHex(h1, h2, t) {
+  const p = c => parseInt(c,16);
+  const r = Math.round(p(h1.slice(1,3)) + (p(h2.slice(1,3))-p(h1.slice(1,3)))*t);
+  const g = Math.round(p(h1.slice(3,5)) + (p(h2.slice(3,5))-p(h1.slice(3,5)))*t);
+  const b = Math.round(p(h1.slice(5,7)) + (p(h2.slice(5,7))-p(h1.slice(5,7)))*t);
+  return '#'+r.toString(16).padStart(2,'0')+g.toString(16).padStart(2,'0')+b.toString(16).padStart(2,'0');
+}
+function deriveCustomPalette(bg, text) {
+  const isDark = hexLuminance(bg) < 0.4;
+  const shadowA = isDark ? 0.4 : 0.1;
+  return {
+    theme: { bg, text, link: text },
+    ui: {
+      bg,
+      surface:    mixHex(bg, text, 0.06),
+      surface2:   mixHex(bg, text, 0.12),
+      border:     hexToRgba(text, isDark ? 0.12 : 0.15),
+      text,
+      textMuted:  mixHex(text, bg, 0.4),
+      accent:     text,
+      accentDark: mixHex(text, bg, 0.2),
+      shadow:     `0 2px 8px rgba(0,0,0,${shadowA}), 0 4px 24px rgba(0,0,0,${(shadowA*1.25).toFixed(2)}), 0 8px 40px rgba(0,0,0,${(shadowA*0.7).toFixed(2)})`,
+    },
+  };
+}
+
+/** Full shell-UI palette derived from each reader theme — applied to all panels/sidebars. */
+const THEME_UI = {
+  light: {
+    bg:         '#f9f9f6',
+    surface:    '#f2f2ef',
+    surface2:   '#eaeae6',
+    border:     'rgba(26,26,26,0.12)',
+    text:       '#1a1a1a',
+    textMuted:  '#6b6b6b',
+    accent:     '#c73652',
+    accentDark: '#a82843',
+    shadow:     '0 2px 8px rgba(20,20,20,.08), 0 4px 24px rgba(20,20,20,.12), 0 8px 40px rgba(20,20,20,.08)',
+  },
+  sepia: {
+    bg:         '#f4ecd8',
+    surface:    '#eddfca',
+    surface2:   '#e5d3b8',
+    border:     'rgba(62,46,26,0.15)',
+    text:       '#3e2e1a',
+    textMuted:  '#7a5e40',
+    accent:     '#8b4513',
+    accentDark: '#6e360e',
+    shadow:     '0 2px 8px rgba(60,40,20,.08), 0 4px 24px rgba(60,40,20,.12), 0 8px 40px rgba(60,40,20,.08)',
+  },
+  dark: {
+    bg:         '#111111',
+    surface:    '#1e1e1e',
+    surface2:   '#2a2a2a',
+    border:     'rgba(224,224,224,0.12)',
+    text:       '#e0e0e0',
+    textMuted:  '#909090',
+    accent:     '#e94560',
+    accentDark: '#c73652',
+    shadow:     '0 2px 8px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.4), 0 8px 40px rgba(0,0,0,.25)',
+  },
+  sepiaDark: {
+    bg:         '#c4b090',
+    surface:    '#b8a480',
+    surface2:   '#ac9870',
+    border:     'rgba(46,32,20,0.15)',
+    text:       '#2e2014',
+    textMuted:  '#6a5040',
+    accent:     '#7a3a10',
+    accentDark: '#5e2c0a',
+    shadow:     '0 2px 8px rgba(40,24,8,.12), 0 4px 24px rgba(40,24,8,.16), 0 8px 40px rgba(40,24,8,.10)',
+  },
+  midnight: {
+    bg:         '#0f172a',
+    surface:    '#1e293b',
+    surface2:   '#334155',
+    border:     'rgba(226,232,240,0.1)',
+    text:       '#e2e8f0',
+    textMuted:  '#94a3b8',
+    accent:     '#38bdf8',
+    accentDark: '#0ea5e9',
+    shadow:     '0 2px 8px rgba(0,0,0,.4), 0 4px 24px rgba(0,0,0,.5), 0 8px 40px rgba(0,0,0,.35)',
+  },
+  nord: {
+    bg:         '#2e3440',
+    surface:    '#3b4252',
+    surface2:   '#434c5e',
+    border:     'rgba(216,222,233,0.1)',
+    text:       '#d8dee9',
+    textMuted:  '#9099ab',
+    accent:     '#88c0d0',
+    accentDark: '#5e81ac',
+    shadow:     '0 2px 8px rgba(0,0,0,.25), 0 4px 24px rgba(0,0,0,.35), 0 8px 40px rgba(0,0,0,.22)',
+  },
+};
+
+// ── System fonts (alphabetical) ───────────────────────────────────────────────
+const SYSTEM_FONTS = [
+  { label: 'Arial',           value: 'Arial, Helvetica, sans-serif' },
+  { label: 'Courier New',     value: '"Courier New", Courier, monospace' },
+  { label: 'Garamond',        value: 'Garamond, "EB Garamond", serif' },
+  { label: 'Georgia',         value: 'Georgia, serif' },
+  { label: 'Palatino',        value: '"Palatino Linotype", Palatino, "Book Antiqua", serif' },
+  { label: 'Times New Roman', value: '"Times New Roman", Times, serif' },
+  { label: 'Trebuchet MS',    value: '"Trebuchet MS", Helvetica, sans-serif' },
+  { label: 'Verdana',         value: 'Verdana, Geneva, sans-serif' },
+];
+
+// ── Defaults ──────────────────────────────────────────────────────────────────
+const DEFAULT_STATUS_BAR = {
+  font:             '',       // '' = inherit UI font
+  fontSize:         13,
+  fontStyle:        'bold',   // 'normal' | 'bold' | 'italic' | 'bold italic'
+  defaultPpm:       1.5,      // pages/min before speed samples exist
+  positions: {
+    tl: ['currentTime', 'pctBook'],
+    tc: ['chapterTitle'],
+    tr: ['timeLeftChap', 'timeLeftBook'],
+    bl: ['chapterPage'],
+    bc: ['pagesLeftChap', 'pagesLeftBook'],
+    br: [],
+  },
+  separatorTop:          true,
+  separatorBottom:       true,
+  separatorThickness:    1,
+  showIcons:        {},           // { [statId]: false } to hide icon; default = show all
+  bookProgressBar:  { show: false, position: 'bottom', thickness: 3 },
+  chapProgressBar:  { show: false, position: 'bottom', thickness: 2 },
+  clockFormat:      '24h',   // '24h' | '12h'
+};
+
+// Stat definitions — id, icon, translated label (use function to get current lang)
+function getStatusStats() {
+  return [
+    { id: 'chapterPage',   icon: '/images/chapter_page.svg',    label: t('reader.sb_chapter_page') },
+    { id: 'bookPage',      icon: '/images/book_page.svg',       label: t('reader.sb_book_page') },
+    { id: 'pagesLeftChap', icon: '/images/chapter_end.svg',     label: t('reader.sb_pages_left_chap') },
+    { id: 'pagesLeftBook', icon: '/images/book_end.svg',        label: t('reader.sb_pages_left_book') },
+    { id: 'pctChapter',    icon: '/images/chapter_progress.svg',label: t('reader.sb_pct_chap') },
+    { id: 'pctBook',       icon: '/images/book_progress.svg',   label: t('reader.sb_pct_book') },
+    { id: 'timeLeftChap',  icon: '/images/time_end_chapter.svg',label: t('reader.sb_time_left_chap') },
+    { id: 'timeLeftBook',  icon: '/images/time_end_book.svg',   label: t('reader.sb_time_left_book') },
+    { id: 'currentTime',   icon: '/images/time.svg',            label: t('reader.sb_current_time') },
+    { id: 'bookTitle',     icon: '/images/book_title.svg',      label: t('reader.sb_book_title') },
+    { id: 'bookAuthor',    icon: '/images/book_author.svg',     label: t('reader.sb_book_author') },
+    { id: 'series',        icon: '/images/shelf.svg',           label: t('reader.sb_series') },
+    { id: 'chapterTitle',  icon: '/images/chapter_title.svg',   label: t('reader.sb_chap_title') },
+    { id: 'chapterNum',    icon: '/images/chapters.svg',        label: t('reader.sb_chap_num') },
+    { id: 'battery',       icon: '/images/battery.svg',         label: t('reader.sb_battery') },
+    { id: 'online',        icon: '/images/offline.svg',         label: t('reader.sb_online') },
+  ];
+}
+
+/** Build an <img> tag for a status-bar icon (SVG path → CSS class derived from filename). */
+function sbIconHtml(iconSrc) {
+  const base = iconSrc.replace('/images/', '').replace('.svg', '');
+  const cls  = base.replace(/_/g, '-');
+  return `<img src="${iconSrc}" class="nav-icon nav-icon-sb nav-icon-sb-${cls}" alt="">`;
+}
+
+/** Escape a string for safe use in HTML text content. */
+function sbEsc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+const DEFAULT_PREFS = {
+  fontSize:       20,
+  fontFamily:     'Georgia, serif',
+  lineHeight:     1.4,
+  letterSpacing:  0,            // extra letter spacing in tenths of px (0–100 → 0–10px)
+  margin:         12,
+  spread:         'auto',       // two-page default
+  overrideStyles: true,
+  theme:          'sepia',
+  customBg:       '#000000',
+  customText:     '#c8b89a',
+  autoHideHeader: true,
+  keepScreenOn:   true,
+  eink:           false,        // strip all colors for e-ink displays
+  paraIndent:     true,         // paragraph text-indent (first line)
+  paraIndentSize: 10,           // indent size when paraIndent=true (em × 10, so 10 = 1.0em)
+  paraSpacing:    0,            // extra bottom margin between paragraphs (em × 10, so 0–30)
+  mouseWheelNav:  false,        // navigate pages with mouse wheel
+  volumeKeysEnabled: false,    // navigate pages with hardware volume keys (Android app only)
+  volumeKeysSwapped: false,    // swap volume-up/down direction
+  lockPortrait:      false,    // lock orientation to portrait (PWA + Android app)
+  skipOpenProgressCheck: false, // if true, do not restore/sync progress on open
+  skipSaveOnClose: false,       // if true, do not auto-save when leaving/closing
+  chapHeadSpacing: true,        // override book heading margins to compact spacing
+  compactBlankLines: false,     // hide whitespace-only <p> elements
+  disableJustify:  false,        // left-align text instead of justified
+  hyphenation:    false,         // CSS hyphens: auto inside epub iframe
+  hyphenLang:     '',           // empty = keep book's own lang attr; else override e.g. 'en'
+  bionicReading:  false,        // emphasize word prefixes for easier scanning
+  pageGapShadow:  false,        // show center-spine box-shadow in two-page mode
+  dictionaries:   [],           // enabled dict IDs in priority order; null = all disabled; empty = use all
+  dictionaryOrder: [],          // all dict IDs in user's display order (including disabled ones)
+  edgePadding:    { top: 0, bottom: 0, left: 0, right: 0 },   // px inset for curved screens
+  navZoneLeftPct:  0,          // % of screen width — tap/click to go back
+  navZoneRightPct: 0,          // % of screen width — tap/click to go forward
+  headerButtonScalePct: 100,    // % of default responsive size (36 desktop / 44 mobile)
+  headerBtnAnnotations:  true,  // show annotations button in header
+  headerBtnSearch:       true,  // show search button in header
+  headerBtnPercentage:   true,  // show percentage/jump button in header
+  headerBtnSync:         true,  // show manual sync button in header
+  headerBtnSleepTimer:   true,  // show sleep timer button in header
+  headerBtnFullscreen:   true,  // show fullscreen button in header
+  bookmarkBadge:         true,  // show count badge on bookmark button
+  annotationBadge:       true,  // show count badge on annotations button
+  floatNavBtn:           false, // floating one-handed nav button
+  floatNavBtnPos:        null,  // { xPct, yPct } saved position; null = default right-center
+  floatNavBtnOpacity:    70,    // 10-100, button opacity %
+  vertNavZones:          false, // top/bottom half tap navigation
+  vertNavZonesReversed:  false, // true = top:next, bottom:prev
+  statusBar:      null,         // deep-merged in loadPrefs()
+  pageTurnAnim:   'fade',       // 'none' | 'fade' | 'slide' | 'paper' | 'momentum' | 'zoom'
+  pageTurnDrag:   true,         // finger-tracking drag for 'paper' / 'momentum'
+};
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let _cxReader       = null;  // CXReader instance (the reader engine)
+let _epubArrayBuffer = null; // raw EPUB bytes, set before startRendition()
+let _cxKbdIframe    = null;  // iframe that currently has keyboard handlers attached
+let _cxDictIframe   = null;  // iframe that currently has dictionary handlers attached
+let _cxLinkHandler  = null;  // window message handler for in-book link clicks
+let _cxViewerPadTop = 0;     // measured overlap of top status bar over epub-viewer (px)
+let _cxViewerPadBot = 0;     // measured overlap of bottom status bar over epub-viewer (px)
+let _cxViewerPaddingSet = false; // true after the first post-render inset measurement
+let _cxTouchNavIframe = null; // iframe that currently has touch-nav handlers attached
+let currentBook  = null;
+let prefs        = loadPrefs();
+let currentCfi   = '';
+let currentPct        = 0;
+let lastKnownGoodPct  = 0;
+let currentSpineIndex = 0;  // 0-based spine item index, used to generate KOReader xpointer
+let lastKnownXPointer = null; // precise xpointer last received from KOReader/server (e.g. /body/DocFragment[5]/body/div/p[21]/text().0)
+let lastChapterHref = null;  // chapter-boundary save tracking
+let lastSentChapterHref = null; // last chapter for which remote progress was pushed
+let _finishedMessageShown = false; // "you've finished this book" overlay — once per page load
+let availableDicts  = null;  // cached GET /api/dictionary response
+let _batteryMgr     = null;  // BatteryManager from navigator.getBattery(), null if unsupported
+let _isOnline       = navigator.onLine; // kept in sync by online/offline events
+let pendingNavDirection = null; // 'next' or 'prev' tracking for chapter jump corrections
+let pendingWasChapterEnd = true;  // whether goNext() was called from the last page
+let deferredNextPending  = false; // true while a mid-repagination NEXT is deferred
+let _autoAdvancePending  = false; // true while a stuck-page auto-advance is in flight
+let isReady = false;          // true only after initial position is fully displayed
+let openCfi = '';             // CFI at the moment the book was first ready — used to skip no-op kosync pushes
+let openPct = 0;             // percentage at the moment the book was first ready — detects within-chapter movement for close push
+let tocFlatItems = [];
+let customFonts  = [];
+let fontFaceCSS  = '';
+// Search state
+let searchAbort = { aborted: false };
+let preSearchCfi = null;      // position before first result jump
+// Two-phase search navigation state:
+//   phase 'first'  – navigated to chapter href, waiting for relocated to re-nav to exact CFI
+//   phase 'second' – navigated to exact CFI, waiting for relocated to mark highlights
+let searchNav = null; // null | { cfi, navCfi, query, href, phase }
+let bionicWordCache = new Map();      // per-word split cache
+let bookmarksCache = [];              // loaded bookmarks for current book
+let preBookmarkCfi = null;            // position before a bookmark jump (for back/accept)
+let preAnnotationCfi = null;          // position before an annotation jump (for back/accept)
+
+// Clear both bookmark and annotation pre-jump states + hide their buttons.
+// Called before starting a new bookmark/annotation jump so at most one pair of
+// back/accept buttons is ever visible at once.
+function _clearNavPreJumps() {
+  preBookmarkCfi  = null;
+  preAnnotationCfi = null;
+  if (bookmarkBackBtn)    { bookmarkBackBtn.style.display    = 'none'; }
+  if (bookmarkAcceptBtn)  { bookmarkAcceptBtn.style.display  = 'none'; }
+  if (annotationBackBtn)  { annotationBackBtn.style.display  = 'none'; }
+  if (annotationAcceptBtn){ annotationAcceptBtn.style.display = 'none'; }
+}
+let annotationsCache = [];            // loaded annotations for current book
+let _pendingAnnotation = null;        // {cfiRange, text} waiting for color/note pick
+let _editingAnnotationId = null;      // id of annotation being edited in note editor
+let _pendingNoteColor = 'yellow';     // color selected in note editor before save
+const WORD_HIGHLIGHT_LINGER_MS = 500; // how long the press-highlight lingers after a dialog closes
+let _clearHlTimer = null;
+let _annotToolbarTimer = null; // guards against mouseup firing before dblclick on desktop
+// Reading statistics tracking
+let statsSessionId = null;            // active reading_sessions.id
+let sessionPageCount = 0;             // page navigation events in current session
+let sessionStartPct = null;           // currentPct snapshot when the session started
+
+// ── Fork sync policy (juliefuller fork; extends upstream thehijacker/codexa) ──
+// Upstream syncs KOReader progress only on chapter boundaries and book close.
+// This fork adds e-ink / BookOrbit-friendly sync so cross-device position stays
+// fresh without cover-close or pagehide beacons (unreliable on Boox; intentionally omitted).
+//
+// Layers (all no-op when isPeekMode — peek skips progress saves entirely):
+//   1. Chapter boundary — inherited from upstream (saveProgress on spine href change)
+//   2. Debounced (60s)  — fires after last page turn; scheduleDebouncedSync on relocated
+//   3. Periodic (4 min) — heartbeat while reading within one chapter; uses inSession
+//   4. Manual sync btn  — force push; confirms if position is behind bestKnownRemotePct
+//   5. Close / leave    — saveProgressBackground (local + kosync when forward of high-water)
+//
+// Guards (not in upstream):
+//   lastSyncedCfi      — skip kosync when CFI unchanged since last successful push
+//   bestKnownRemotePct — never push backwards unless user confirms manual sync (forced)
+const SYNC_DEBOUNCE_MS   = 60000;    // inactivity debounce — resets on every page turn
+const SYNC_INTERVAL_MS   = 240000;   // 4-minute heartbeat — always fires regardless of activity
+let syncDebounceTimer  = null;
+let syncIntervalTimer  = null;
+let lastSyncedCfi      = '';           // CFI at last successful remote push — used to skip duplicate syncs
+let bestKnownRemotePct = 0;            // high-water mark from all sources — kosync is never pushed below this
+let _kosyncPushFailures    = 0;        // consecutive remote push failures for current book
+let _kosyncWarnedThisSession = false;  // only warn once per book load
+let _bookorbitWarnedThisSession = false; // only warn once per book load (automatic pushes)
+
+// ── Status bar state ──────────────────────────────────────────────────────────
+let currentHref      = '';    // current spine href (updated from the cx-relocated event)
+let currentChapPage  = 0;     // current page within chapter (left page in two-page mode)
+let currentEndPage   = 0;     // right-page number in two-page mode (0 in single-page)
+let currentChapTotal = 0;     // total pages in current chapter
+let currentIsTwoPage = false; // true when two pages are visible simultaneously
+let chapPageCache    = {};    // { [spineIndex]: totalPages } accumulated as chapters are visited
+// Reading speed tracking: each entry is a { time } recorded on every page turn
+let speedSamples     = [];    // up to 25 recent samples
+
+// Space reserved at the bottom of the rendition so the status bar never overlaps text.
+// Must match the value used in book.renderTo() — kept here so all resize calls share it.
+// 40px (was 32) gives a comfortable gap above the bottom separator on all devices including
+// older Android WebViews that may not perfectly honour epub.js column height constraints.
+const RENDITION_BOTTOM_RESERVE = 40;
+
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const readerLayout   = document.querySelector('.reader-layout');
+const loadingOverlay = document.getElementById('loading-overlay');
+const loadingMsg     = document.getElementById('loading-msg');
+const epubViewer     = document.getElementById('epub-viewer');
+const bookTitleEl    = document.getElementById('book-title');
+const chapterTitleEl = document.getElementById('chapter-title');
+const progressFillEl      = document.getElementById('progress-fill');
+// Status bar overlay elements
+const sbTop           = document.getElementById('sb-top');
+const sbBottom        = document.getElementById('sb-bottom');
+const sbTl            = document.getElementById('sb-tl');
+const sbTc            = document.getElementById('sb-tc');
+const sbTr            = document.getElementById('sb-tr');
+const sbBl            = document.getElementById('sb-bl');
+const sbBc            = document.getElementById('sb-bc');
+const sbBr            = document.getElementById('sb-br');
+const sbSeparatorTop    = document.getElementById('sb-sep-top');
+const sbSeparatorBottom = document.getElementById('sb-sep-bottom');
+const sbChapProg      = document.getElementById('sb-chap-prog');
+const sbChapProgFill  = document.getElementById('sb-chap-prog-fill');
+const sbBookProg      = document.getElementById('sb-book-prog');
+const sbBookProgFill  = document.getElementById('sb-book-prog-fill');
+const tocSidebar      = document.getElementById('toc-sidebar');
+const tocListEl      = document.getElementById('toc-list');
+const settingsPanel  = document.getElementById('settings-panel');
+const panelBackdrop  = document.getElementById('panel-backdrop');
+const searchSidebar   = document.getElementById('search-sidebar');
+const searchInput     = document.getElementById('search-input');
+const searchSubmitBtn = document.getElementById('search-submit');
+const searchStatusEl  = document.getElementById('search-status');
+const searchResultsEl = document.getElementById('search-results');
+const searchBackBtn   = document.getElementById('btn-search-back');
+const searchAcceptBtn = document.getElementById('btn-search-accept');
+const jumpPctPanel     = document.getElementById('jump-pct-panel');
+const jumpPctBackdrop  = document.getElementById('jump-pct-backdrop');
+const headerDismissBackdrop = document.getElementById('header-dismiss-backdrop');
+const jumpPctSlider    = document.getElementById('jump-pct-slider');
+const jumpPctValue     = document.getElementById('jump-pct-value');
+const fullscreenBtn   = document.getElementById('btn-fullscreen');
+const bookmarksSidebar = document.getElementById('bookmarks-sidebar');
+const bookmarksListEl  = document.getElementById('bookmarks-list');
+const bookmarksBadge   = document.getElementById('bookmarks-badge');
+const annotationsBadge = document.getElementById('annotations-badge');
+const bookmarkBackBtn    = document.getElementById('btn-bookmark-back');
+const bookmarkAcceptBtn  = document.getElementById('btn-bookmark-accept');
+const annotationBackBtn  = document.getElementById('btn-annotation-back');
+const annotationAcceptBtn = document.getElementById('btn-annotation-accept');
+
+// ── Prefs ─────────────────────────────────────────────────────────────────────
+// Keys that are stored per-book (content appearance).  All others are global.
+const PER_BOOK_KEYS = ['fontSize','fontFamily','lineHeight','letterSpacing','margin','theme','overrideStyles','paraIndent','paraIndentSize','paraSpacing','dictionaries','dictionaryOrder','bionicReading','skipOpenProgressCheck','skipSaveOnClose'];
+
+function loadPrefs() {
+  try {
+    const s = localStorage.getItem('br_reader_prefs');
+    const saved = s ? JSON.parse(s) : {};
+    const sb = saved.statusBar || {};
+    const legacyBtnPx = typeof saved.headerButtonSize === 'number' ? saved.headerButtonSize : null;
+    const btnBase = window.matchMedia('(max-width: 640px)').matches ? 44 : 36;
+    const merged = {
+      ...DEFAULT_PREFS,
+      ...saved,
+      headerButtonScalePct: saved.headerButtonScalePct ?? (
+        legacyBtnPx != null && legacyBtnPx > 0
+          ? Math.min(225, Math.max(75, Math.round(legacyBtnPx / btnBase * 100)))
+          : DEFAULT_PREFS.headerButtonScalePct
+      ),
+      edgePadding: { ...DEFAULT_PREFS.edgePadding, ...(saved.edgePadding || {}) },
+      statusBar: {
+        ...DEFAULT_STATUS_BAR,
+        ...sb,
+        positions:       {
+          ...DEFAULT_STATUS_BAR.positions,
+          // On mobile with no saved br slot, show battery + connection by default.
+          ...(!('br' in (sb.positions || {})) && window.matchMedia('(max-width: 640px)').matches
+              ? { br: ['battery', 'online'] } : {}),
+          ...sb.positions,
+        },
+        showIcons:       { ...DEFAULT_STATUS_BAR.showIcons,       ...sb.showIcons },
+        bookProgressBar: { ...DEFAULT_STATUS_BAR.bookProgressBar, ...sb.bookProgressBar },
+        chapProgressBar: { ...DEFAULT_STATUS_BAR.chapProgressBar, ...sb.chapProgressBar },
+        clockFormat:     sb.clockFormat || DEFAULT_STATUS_BAR.clockFormat,
+      },
+    };
+    if (localStorage.getItem('br_library_theme') === 'eink') merged.eink = true;
+    return merged;
+  } catch { return { ...DEFAULT_PREFS, statusBar: { ...DEFAULT_STATUS_BAR } }; }
+}
+
+// Load per-book overrides and apply them onto prefs.
+function loadBookPrefs(bookId) {
+  if (!bookId) return;
+  try {
+    const all = JSON.parse(localStorage.getItem('br_book_prefs') || '{}');
+    const saved = all[bookId] || {};
+    // dictionaries (the ENABLED set) must default to "[] = unconfigured" per book (so the
+    // book-language-based default in renderDictSettings/showDictPopup kicks in), NOT carry over
+    // whatever the previously-read book left in `prefs` — persistPrefs() always dumps the
+    // CURRENT prefs (including per-book values) into the global br_reader_prefs blob, so without
+    // this reset a book with no override of its own silently inherits the last book's explicit
+    // dictionary selection instead of getting its own language-matched default. dictionaryOrder
+    // (just the display order of the dict list, not language-specific) intentionally keeps
+    // carrying over globally, same as other PER_BOOK_KEYS like fontSize/theme.
+    prefs.dictionaries = DEFAULT_PREFS.dictionaries;
+    PER_BOOK_KEYS.forEach(k => { if (k in saved) prefs[k] = saved[k]; });
+  } catch { /* ignore */ }
+  updateBookPrefsIndicator();
+}
+
+// Save current per-book overrides (only if they differ from global prefs).
+function saveBookPrefs(bookId) {
+  if (!bookId) return;
+  try {
+    const global = loadPrefs();
+    const overrides = {};
+    PER_BOOK_KEYS.forEach(k => { if (prefs[k] !== global[k]) overrides[k] = prefs[k]; });
+    const all = JSON.parse(localStorage.getItem('br_book_prefs') || '{}');
+    if (Object.keys(overrides).length) all[bookId] = overrides;
+    else delete all[bookId];
+    localStorage.setItem('br_book_prefs', JSON.stringify(all));
+  } catch { /* ignore */ }
+  updateBookPrefsIndicator();
+}
+
+function clearBookPrefs(bookId) {
+  if (!bookId) return;
+  try {
+    const all = JSON.parse(localStorage.getItem('br_book_prefs') || '{}');
+    delete all[bookId];
+    localStorage.setItem('br_book_prefs', JSON.stringify(all));
+  } catch { /* ignore */ }
+}
+
+function hasBookPrefs(bookId) {
+  if (!bookId) return false;
+  try {
+    const all = JSON.parse(localStorage.getItem('br_book_prefs') || '{}');
+    return !!all[bookId] && Object.keys(all[bookId]).length > 0;
+  } catch { return false; }
+}
+
+function updateBookPrefsIndicator() {
+  const btn = document.getElementById('btn-reset-book-prefs');
+  if (btn) btn.classList.toggle('hidden', !hasBookPrefs(currentBook?.id));
+}
+
+function persistPrefs() {
+  // Save global prefs as-is (includes current values which may be book-specific overrides).
+  // The per-book layer is stored separately in br_book_prefs; on load, loadBookPrefs() re-applies
+  // the overrides so global prefs naturally reflect the last used values for each book context.
+  localStorage.setItem('br_reader_prefs', JSON.stringify(prefs));
+  // Also track per-book overrides when a book is open
+  if (currentBook?.id) saveBookPrefs(currentBook.id);
+  apiFetch('/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ reader_prefs: prefs }),
+  }).catch(() => {});
+}
+
+function readBionicReloadState() {
+  try {
+    const raw = sessionStorage.getItem(BIONIC_RELOAD_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.bookId !== bookId) return null;
+    if ((Date.now() - Number(parsed.ts || 0)) > BIONIC_RELOAD_MAX_AGE_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeInterruptedSession() {
+  if (!currentBook || !isReady || !currentCfi) return;
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      bookId, title: currentBook.title, author: currentBook.author || '',
+      pct: currentPct, cfi: currentCfi, ts: Date.now(),
+    }));
+  } catch { /* quota */ }
+}
+
+function clearInterruptedSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+}
+
+/** Called by library.js before navigating to the reader — tells reader to override restore position. */
+function writeResumeState(bId, cfi, pct) {
+  try {
+    sessionStorage.setItem(RESUME_STATE_KEY, JSON.stringify({ bookId: bId, cfi, pct, ts: Date.now() }));
+  } catch { /* quota */ }
+}
+
+function clearBionicReloadState() {
+  try { sessionStorage.removeItem(BIONIC_RELOAD_KEY); } catch { /* ignore */ }
+}
+
+function saveBionicReloadState() {
+  const cfi = currentCfi || '';
+  const pct = (cfi ? pctFromCfi(cfi) : null) ?? currentPct ?? 0;
+  try {
+    sessionStorage.setItem(BIONIC_RELOAD_KEY, JSON.stringify({
+      bookId,
+      cfi,
+      pct,
+      bionicReading: !!prefs.bionicReading,
+      ts: Date.now(),
+    }));
+  } catch { /* ignore */ }
+}
+
+function spineIndexFromCfi(cfi) {
+  const m = String(cfi || '').match(/epubcfi\(\s*\/6\/(\d+)/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n)) return null;
+  const idx = Math.floor(n / 2) - 1;
+  return idx >= 0 ? idx : null;
+}
+
+function bionicFocusLength(len) {
+  if (len === 0) return 0;
+  if (len === 1) return 1;
+  const focus = Math.ceil(len * 0.4) + (len < 5 ? 1 : 0);  
+  return Math.min(focus, len - 1);
+}
+
+function splitBionicWord(word) {
+  const cached = bionicWordCache.get(word);
+  if (cached) return cached;
+  const focus = Math.min(word.length, bionicFocusLength(word.length));
+  const split = { lead: word.slice(0, focus), tail: word.slice(focus) };
+  bionicWordCache.set(word, split);
+  return split;
+}
+
+function isBionicWordCore(token) {
+  return /^[\p{L}\p{N}][\p{L}\p{N}'’-]*$/u.test(token);
+}
+
+function splitTokenPunctuation(token) {
+  const m = token.match(/^([^\p{L}\p{N}'’-]*)([\p{L}\p{N}'’-]+)([^\p{L}\p{N}'’-]*)$/u);
+  if (!m) return { prefix: '', core: token, suffix: '' };
+  return { prefix: m[1] || '', core: m[2] || '', suffix: m[3] || '' };
+}
+
+function appendBionicTextFragment(doc, fragment, text) {
+  if (!text) return;
+  const parts = text.split(/(\s+)/);
+  for (const part of parts) {
+    if (!part) continue;
+    if (/^\s+$/u.test(part)) {
+      fragment.appendChild(doc.createTextNode(part));
+      continue;
+    }
+    const { prefix, core, suffix } = splitTokenPunctuation(part);
+    const coreLetters = core.replace(/[^\p{L}\p{N}]/gu, '');
+    if (coreLetters.length < 3 || !isBionicWordCore(core)) {
+      fragment.appendChild(doc.createTextNode(part));
+      continue;
+    }
+    const { lead, tail } = splitBionicWord(core);
+    if (prefix) fragment.appendChild(doc.createTextNode(prefix));
+    const wrap = doc.createElement('span');
+    wrap.className = 'br-bionic-word';
+    const focus = doc.createElement('span');
+    focus.className = 'br-bionic-focus';
+    focus.textContent = lead;
+    wrap.appendChild(focus);
+    if (tail) wrap.appendChild(doc.createTextNode(tail));
+    fragment.appendChild(wrap);
+    if (suffix) fragment.appendChild(doc.createTextNode(suffix));
+  }
+}
+
+function shouldSkipBionicNode(node) {
+  if (!node?.parentElement) return true;
+  if (!node.nodeValue || !node.nodeValue.trim()) return true;
+  const parent = node.parentElement;
+  if (parent.closest('script,style,pre,code,kbd,samp,math,ruby,rt,rp,textarea,select,option')) return true;
+  if (parent.closest('.br-bionic-word,.br-hl')) return true;
+  return false;
+}
+
+function collectBionicTextNodes(doc) {
+  const out = [];
+  if (!doc?.body) return out;
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    if (!shouldSkipBionicNode(node)) out.push(node);
+    node = walker.nextNode();
+  }
+  return out;
+}
+
+function warmBionicWordCacheFromDocument(doc) {
+  const nodes = collectBionicTextNodes(doc);
+  nodes.forEach(node => {
+    const parts = node.nodeValue.split(/(\s+)/);
+    for (const part of parts) {
+      if (!part || /^\s+$/u.test(part)) continue;
+      const { core } = splitTokenPunctuation(part);
+      if (core && isBionicWordCore(core) && core.replace(/[^\p{L}\p{N}]/gu, '').length >= 3) {
+        splitBionicWord(core);
+      }
+    }
+  });
+}
+
+// Build a bionic-safe CFI by stripping text-node steps and char offsets.
+// Handles both simple CFIs and range CFIs (epubcfi(base,start,end)).
+// Range CFIs are converted to a simple CFI using base+start with offsets stripped.
+function makeBionicSafeCfi(cfi) {
+  if (!cfi) return cfi;
+  // Range CFI: epubcfi(base,start,end)
+  if (cfi.includes(',')) {
+    const inner = cfi.slice(8, -1); // strip 'epubcfi(' and ')'
+    const c1 = inner.indexOf(',');
+    const c2 = inner.indexOf(',', c1 + 1);
+    if (c1 !== -1 && c2 !== -1) {
+      const base  = inner.slice(0, c1);
+      let   start = inner.slice(c1 + 1, c2);
+      start = start.replace(/:(\d+)$/, '');                                           // strip :charOffset
+      start = start.replace(/\/(\d+)$/, (m, n) => parseInt(n) % 2 === 1 ? '' : m);   // strip odd (text-node) step
+      log('[bionic] makeBionicSafeCfi: range CFI base:', base, 'start stripped to:', start);
+      return `epubcfi(${base}${start})`;
+    }
+  }
+  // Simple CFI
+  const s1 = cfi.replace(/:(\d+)\)$/, ')');
+  const s2 = s1.replace(/\/(\d+)\)$/, (m, n) => parseInt(n) % 2 === 1 ? ')' : m);
+  return s2;
+}
+
+// Find a spine item for a given href, using direct lookup first then filename fuzzy match.
+// Handles path-prefix mismatches (e.g. TOC has "OEBPS/Text/ch.xhtml" but spine stores "Text/ch.xhtml").
+// Returns a CXReader spine item ({ href, absPath, index, ... }) or null.
+function findSpineItemForHref(href) {
+  if (!href) return null;
+  const spine = _cxReader?.spine;
+  if (!spine?.length) return null;
+  const base   = href.split('#')[0].toLowerCase();
+  const fname  = base.split('/').pop();
+  // Direct match on resolved path or raw href, then filename fuzzy match.
+  return spine.find(s => {
+    const sh = (s.absPath || s.href || '').split('#')[0].toLowerCase();
+    return sh === base;
+  }) || spine.find(s => {
+    const sh = (s.absPath || s.href || '').split('#')[0].toLowerCase();
+    return sh.split('/').pop() === fname;
+  }) || null;
+}
+
+function applyBionicToDocument(doc) {
+  if (!prefs.bionicReading || !doc?.body) return;
+  if (doc.documentElement?.dataset?.brBionicApplied === '1') {
+    log('[bionic] applyBionicToDocument: already applied, skipping');
+    return;
+  }
+  const nodes = collectBionicTextNodes(doc);
+  log('[bionic] applyBionicToDocument: transforming', nodes.length, 'text nodes in', doc.location?.href || '(unknown)');
+  nodes.forEach(node => {
+    const frag = doc.createDocumentFragment();
+    appendBionicTextFragment(doc, frag, node.nodeValue || '');
+    node.parentNode?.replaceChild(frag, node);
+  });
+  if (doc.documentElement?.dataset) doc.documentElement.dataset.brBionicApplied = '1';
+  log('[bionic] applyBionicToDocument: done');
+}
+
+
+// ── Custom font loading ───────────────────────────────────────────────────────
+function fontFamilyFromFilename(f) {
+  return f
+    .replace(/\.(ttf|otf|woff2?)$/i, '')
+    .replace(/[-_](Regular|Bold|Italic|BoldItalic|Light|Medium|SemiBold|Black|Thin|ExtraLight|ExtraBold|Heavy|Oblique)$/i, '')
+    .replace(/[-_]/g, ' ')
+    .trim();
+}
+function fontWeightFromFilename(f) {
+  const l = f.toLowerCase();
+  if (l.includes('thin'))       return '100';
+  if (l.includes('extralight')) return '200';
+  if (l.includes('light'))      return '300';
+  if (l.includes('semibold'))   return '600';
+  if (l.includes('extrabold'))  return '800';
+  if (l.includes('black') || l.includes('heavy')) return '900';
+  if (l.includes('bold'))       return 'bold';
+  return 'normal';
+}
+function fontStyleFromFilename(f) {
+  const l = f.toLowerCase();
+  return (l.includes('italic') || l.includes('oblique')) ? 'italic' : 'normal';
+}
+
+async function loadCustomFonts() {
+  customFonts = [];
+  let files;
+  try {
+    files = await apiFetch('/fonts', { timeout: 8000 });
+    try { localStorage.setItem('br_font_list', JSON.stringify(files)); } catch {}
+  } catch {
+    try { files = JSON.parse(localStorage.getItem('br_font_list') || '[]'); } catch {}
+    if (!files?.length) return;
+  }
+  try {
+    if (!files.length) return;
+    const families = {};
+    files.forEach(f => {
+      const fam = fontFamilyFromFilename(f);
+      if (!families[fam]) families[fam] = [];
+      families[fam].push(f);
+    });
+    const cssLines = [];
+    Object.entries(families).forEach(([family, ffiles]) => {
+      ffiles.forEach(f => {
+        // No format() hint: it's inferred from the file extension, but renamed/repackaged
+        // fonts often have an extension that doesn't match their actual sfnt data, and a
+        // wrong format() makes browsers silently drop the whole @font-face (the font then
+        // never applies and falls back to Georgia). Omitting it lets the engine sniff the
+        // bytes. Absolute origin URL so it also resolves inside CXReader's blob: iframe,
+        // whose document origin can be opaque on Android WebView.
+        cssLines.push(`@font-face {
+  font-family: "${family}";
+  src: url("${location.origin}/user-fonts/${encodeURIComponent(f)}");
+  font-weight: ${fontWeightFromFilename(f)};
+  font-style: ${fontStyleFromFilename(f)};
+}`);
+      });
+      customFonts.push({ label: family, value: `"${family}", Georgia, serif` });
+    });
+    fontFaceCSS = cssLines.join('\n');
+    customFonts.sort((a, b) => a.label.localeCompare(b.label));
+    let hostStyle = document.getElementById('_custom-font-faces');
+    if (!hostStyle) {
+      hostStyle = document.createElement('style');
+      hostStyle.id = '_custom-font-faces';
+      document.head.appendChild(hostStyle);
+    }
+    hostStyle.textContent = fontFaceCSS;
+    // Proactively fetch every custom font's bytes (not just whichever one is active), so the
+    // SW's network-first/cache-fallback handler for /user-fonts/ (public/sw.js) warms its cache
+    // for all of them. @font-face only triggers a fetch when text is actually painted with it —
+    // a font picked in Settings but never yet rendered on this device (or one whose cache got
+    // wiped by an app-update CACHE_VERSION bump) would otherwise stay uncached until the next
+    // time it's used online, and silently fall back to the default font offline in the meantime
+    // (a failed @font-face fetch just drops that font-face, no error surfaces).
+    if (navigator.onLine) {
+      files.forEach(f => { fetch(`/user-fonts/${encodeURIComponent(f)}`).catch(() => {}); });
+    }
+  } catch (err) {
+    warn('[reader] Custom fonts not loaded:', err.message);
+  }
+}
+
+// ── CSS injection ─────────────────────────────────────────────────────────────
+// Key insight: we inject at the END of <body> so our styles (with !important)
+// appear AFTER epub.js's own layout styles injected in <head>.
+// Later same-specificity !important rules win in CSS cascade.
+// Returns a CSS string that strips all colour — pure black on white (or white on
+// black in dark theme) for e-ink displays.
+function buildEinkCss(theme) {
+  const bg   = theme.bg   === '#000000' || theme.bg   === '#000' || theme.bg   === 'black' ? '#000' : '#fff';
+  const text = bg === '#fff' ? '#000' : '#fff';
+  return `
+/* ── e-ink mode: strip all colours ───────────────────────── */
+html, body, body * {
+  background:       ${bg}   !important;
+  background-image: none    !important;
+  color:            ${text} !important;
+  border-color:     ${text} !important;
+  box-shadow:       none    !important;
+  text-shadow:      none    !important;
+}
+a, a * { color: ${text} !important; text-decoration: underline !important; }
+img     { filter: grayscale(100%) !important; }
+`;
+}
+
+// `:where()` (zero-specificity) is Chrome 88+. Older WebViews drop the whole rule as
+// invalid, so the paragraph-margin reset vanishes and browsers fall back to the UA
+// default 1em <p> margins (extra space even at paraSpacing 0). Detect support and emit
+// a plain `p` reset there instead. `selector(:where(a))` reliably reports false on every
+// engine that lacks :where (the selector() condition itself predates :where).
+const _supportsWhere = (() => {
+  try { return !!(window.CSS && CSS.supports && CSS.supports('selector(:where(a))')); }
+  catch { return false; }
+})();
+
+function buildEpubCss() {
+  const theme = prefs.theme === 'custom'
+    ? { bg: prefs.customBg || '#000000', text: prefs.customText || '#c8b89a', link: prefs.customText || '#c8b89a' }
+    : (THEMES[prefs.theme] || THEMES.dark);
+  const fontOverrides = prefs.overrideStyles ? `
+body {
+  font-size:     ${prefs.fontSize}px !important;
+  font-family:   ${prefs.fontFamily} !important;
+  line-height:   ${prefs.lineHeight} !important;
+}
+p, li, td, th, dt, dd, blockquote,
+p span:not(.codexa-dropcap), li span, td span, th span, dt span, dd span, blockquote span {
+  font-size:   ${prefs.fontSize}px !important;
+  font-family: ${prefs.fontFamily} !important;
+  line-height: ${prefs.lineHeight} !important;
+}
+h1, h2, h3, h4, h5, h6 {
+  font-family: ${prefs.fontFamily} !important;
+}` : '';
+
+  return `${fontFaceCSS}
+/* cx-fonts-end */
+html {
+  background: ${theme.bg} !important;
+}
+body {
+  background:     ${theme.bg} !important;
+  color:          ${theme.text} !important;
+  padding-left:   ${prefs.margin}px !important;
+  padding-right:  ${prefs.margin}px !important;
+  padding-top:    36px !important;
+  padding-top:    max(2rem, 36px) !important;
+  padding-bottom: 0px !important;
+  margin:         0 !important;
+  max-width:      100% !important;
+  word-wrap:      break-word !important;
+  box-sizing:     border-box !important;
+}
+/* Clear horizontal spacing from book-defined content wrappers (e.g. <div class="body">).
+   Reader margin is applied via body padding and must be the sole source of side spacing. */
+body > div, body > section, body > article {
+  padding-left:  0 !important;
+  padding-right: 0 !important;
+  margin-left:   0 !important;
+  margin-right:  0 !important;
+  max-width:     100% !important;
+  box-sizing:    border-box !important;
+}
+/* Always enforce theme color on all text — overrides any per-element book CSS */
+body * { color: ${theme.text} !important; }
+a, a * { color: ${theme.link} !important; }
+/* Zero-specificity fallback: prevents browser-default 1em paragraph margins when a book's
+   chapter has no stylesheet (empty <head/>). :where() loses to any author rule, so any book
+   CSS like "p { margin: 2px }" still wins. */
+${_supportsWhere
+  ? ':where(p) { margin-top: 0; margin-bottom: 0.3em; }'
+  : 'p { margin-top: 0; margin-bottom: 0.3em; }'}
+${fontOverrides}
+img:not(.codexa-dropcap-img) {
+  max-width:   100% !important;
+  max-height:  75vh !important;
+  width:       auto !important;
+  height:      auto !important;
+  object-fit:  contain !important;
+  display:     block !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  mix-blend-mode: multiply !important;
+}
+figure { background: transparent !important; background-color: transparent !important; }
+${prefs.eink ? buildEinkCss(theme) : ''}
+${prefs.paraIndent ? `p { text-indent: ${(prefs.paraIndentSize / 10).toFixed(1)}em !important; }` : 'p { text-indent: 0 !important; }'}
+p { margin-top: 0 !important; margin-bottom: ${(prefs.paraSpacing / 10).toFixed(1)}em !important; }
+${prefs.letterSpacing > 0 ? `body, p, li, td, th, span { letter-spacing: ${(prefs.letterSpacing / 10).toFixed(1)}px !important; }` : ''}
+${prefs.disableJustify
+  ? 'body, p, li, td, th, blockquote { text-align: left !important; }'
+  : 'body, p, li, td, th, blockquote { text-align: justify !important; }'}
+${prefs.chapHeadSpacing ? `h1,h2,h3,h4,h5,h6 { margin: 0.2em 0 !important; padding: 0 !important; }
+[class*="heading"],[class*="chapter-head"],[class*="chapterHead"],[class*="chapHead"],[class*="title-block"],[class*="titleBlock"] { height:auto !important; min-height:0 !important; padding-top:0 !important; padding-bottom:0 !important; margin-top:0 !important; margin-bottom:0 !important; }
+div:has(>h1),div:has(>h2),div:has(>h3),div:has(>h4) { height:auto !important; min-height:0 !important; padding-top:0 !important; padding-bottom:0 !important; margin-top:0 !important; margin-bottom:0 !important; }` : ''}
+${prefs.compactBlankLines ? `p:empty, p[data-br-blank] { display: none !important; margin: 0 !important; padding: 0 !important; }` : ''}
+${prefs.hyphenation
+  ? 'html, body, p, li { -webkit-hyphens: auto !important; hyphens: auto !important; }'
+  : 'html, body, p, li { -webkit-hyphens: none !important; hyphens: none !important; }'}
+p, li, blockquote { orphans: 1 !important; widows: 1 !important; }
+/* annotation highlights — rendered as <mark> in the epub DOM */
+mark.annot-hl { cursor: pointer; border-radius: 2px; color: inherit; padding: 0; }
+mark.annot-yellow { background: rgba(255,204,0,.45); }
+mark.annot-green  { background: rgba(0,210,110,.40); }
+mark.annot-blue   { background: rgba(30,160,255,.40); }
+mark.annot-pink   { background: rgba(255,80,130,.40); }
+mark.annot-hl.has-note { text-decoration: underline; text-decoration-style: solid; text-decoration-thickness: 2px; }
+${prefs.eink ? `
+mark.annot-yellow { background: rgba(0,0,0,.13) !important; text-decoration: underline solid !important; text-decoration-thickness: 1.5px !important; }
+mark.annot-green  { background: rgba(0,0,0,.22) !important; text-decoration: underline solid !important; text-decoration-thickness: 1.5px !important; }
+mark.annot-blue   { background: rgba(0,0,0,.30) !important; text-decoration: underline solid !important; text-decoration-thickness: 1.5px !important; }
+mark.annot-pink   { background: rgba(0,0,0,.19) !important; text-decoration: underline solid !important; text-decoration-thickness: 1.5px !important; }
+mark.annot-hl.has-note { text-decoration-thickness: 3px !important; }
+mark.br-press-hl  { background: rgba(0,0,0,.20) !important; }
+` : ''}
+/* search highlights — background only, zero layout impact */
+mark.br-hl {
+  background: rgba(255,200,0,.5) !important;
+  color: inherit !important;
+  padding: 0 !important; margin: 0 !important;
+  border: none !important; border-radius: 0 !important;
+  font: inherit !important; line-height: inherit !important;
+  display: inline !important;
+}
+/* temporary press highlight — shown while annotation toolbar or dict popup is open */
+mark.br-press-hl {
+  background: rgba(100,160,255,.45) !important;
+  color: inherit !important;
+  padding: 0 !important; margin: 0 !important;
+  border: none !important; border-radius: 2px !important;
+  font: inherit !important; line-height: inherit !important;
+  display: inline !important;
+}
+.br-bionic-word {
+  font-weight: inherit !important;
+}
+.br-bionic-focus {
+  font-weight: 700 !important;
+}
+/* Drop cap layout — classes applied by fixDropCaps() */
+.codexa-dropcap-para { text-indent: 0 !important; }
+.codexa-dropcap {
+  float: left !important;
+  line-height: 0.85 !important;
+  margin-right: 0.06em !important;
+  margin-top:   0.05em !important;
+  margin-bottom: 0 !important;
+  text-indent:   0 !important;
+}
+.codexa-dropcap-img {
+  float: left !important;
+  display: block !important;
+  margin: 0 0.3em 0.1em 0 !important;
+  max-height: 4em !important;
+  max-width: 25% !important;
+  width: auto !important;
+  height: auto !important;
+  object-fit: contain !important;
+  mix-blend-mode: multiply !important;
+}
+`.trim();
+}
+
+// ── Drop cap detection ────────────────────────────────────────────────────────
+const _DROP_CAP_CLS_RE = /drop.?cap|lettrine|chapinit|firstletter|initial.?cap|bigcap|lead.?cap/i;
+
+function _checkBookSheets(doc, el, test) {
+  try {
+    for (const sheet of doc.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch { continue; }
+      for (const rule of rules) {
+        if (rule.type !== 1) continue; // CSSStyleRule only
+        try { if (el.matches(rule.selectorText) && test(rule.style)) return true; }
+        catch { /* invalid selector */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
+function fixDropCaps(doc) {
+  if (doc.documentElement.dataset.brDropCapsFixed) return;
+  doc.documentElement.dataset.brDropCapsFixed = '1';
+
+  // Text drop caps: first-child <span> inside <p> containing 1–4 characters
+  doc.querySelectorAll('p > span:first-child').forEach(span => {
+    const text = span.textContent.trim();
+    if (text.length === 0 || text.length > 4) return;
+    const byClass = _DROP_CAP_CLS_RE.test(span.className) || _DROP_CAP_CLS_RE.test(span.id);
+    const byStyle = !byClass && _checkBookSheets(doc, span, s =>
+      s.float === 'left' ||
+      (s.fontSize && (
+        (s.fontSize.endsWith('em')  && parseFloat(s.fontSize) > 1.5) ||
+        (s.fontSize.endsWith('px')  && parseFloat(s.fontSize) > 28)  ||
+        (s.fontSize.endsWith('rem') && parseFloat(s.fontSize) > 1.5)
+      ))
+    );
+    if (byClass || byStyle) {
+      span.classList.add('codexa-dropcap');
+      span.parentElement.classList.add('codexa-dropcap-para');
+    }
+  });
+
+  // Image drop caps: floated <img> as first child of <p> (directly or inside a span)
+  doc.querySelectorAll('p > img:first-child, p > span:first-child > img:only-child').forEach(img => {
+    const anchor = img.parentElement?.tagName === 'SPAN' ? img.parentElement : img;
+    const isFloat =
+      _checkBookSheets(doc, anchor, s => s.float === 'left') ||
+      (anchor !== img && _checkBookSheets(doc, img, s => s.float === 'left'));
+    if (!isFloat) return;
+    img.classList.add('codexa-dropcap-img');
+    img.closest('p').classList.add('codexa-dropcap-para');
+    // Unwrap single-img span so the float is directly on the img
+    if (anchor !== img && anchor.childNodes.length === 1) anchor.replaceWith(img);
+  });
+}
+
+function injectIntoContents(contents) {
+  if (!contents?.document) return;
+  const doc = contents.document;
+  // Copy xml:lang → lang when lang is absent: Chrome ignores xml:lang for hyphens:auto
+  if (prefs.hyphenation && !doc.documentElement.lang && !prefs.hyphenLang) {
+    const xmlLang = doc.documentElement.getAttribute('xml:lang');
+    if (xmlLang) doc.documentElement.lang = xmlLang;
+  }
+  // Apply hyphenation lang override on the iframe's <html> element
+  if (prefs.hyphenation && prefs.hyphenLang) {
+    doc.documentElement.lang = prefs.hyphenLang;
+  } else if (prefs.hyphenLang === '' && doc.documentElement.dataset.brLangOverridden) {
+    // lang was previously forced by us — restore original if stored
+    const orig = doc.documentElement.dataset.brOrigLang;
+    if (orig !== undefined) doc.documentElement.lang = orig;
+    delete doc.documentElement.dataset.brLangOverridden;
+  }
+  if (prefs.hyphenation && prefs.hyphenLang) {
+    if (!doc.documentElement.dataset.brLangOverridden) {
+      doc.documentElement.dataset.brOrigLang = doc.documentElement.lang || '';
+      doc.documentElement.dataset.brLangOverridden = '1';
+    }
+    doc.documentElement.lang = prefs.hyphenLang;
+  }
+  let el = doc.getElementById('br-custom-styles');
+  const newCss = buildEpubCss();
+  if (!el) {
+    el = doc.createElement('style');
+    el.id = 'br-custom-styles';
+    // Append to body END — comes after epub.js head styles, so our !important wins
+    (doc.body || doc.documentElement).appendChild(el);
+    el.textContent = newCss;
+  } else if (el.textContent !== newCss) {
+    // Only update when CSS actually changed — prevents a second ResizeObserver
+    // cycle from the 'rendered' re-inject that fires after hooks.content.
+    el.textContent = newCss;
+  }
+  fixDropCaps(doc);
+  if (prefs.bionicReading) {
+    applyBionicToDocument(doc);
+  }
+  // No injected touch relay script needed. Touch handling is done by attachIframeDictionary and attachIframeTouchNav.
+  collapseBlankParagraphs(doc);
+  injectAnnotationsIntoContents(contents);
+}
+
+function collapseBlankParagraphs(doc) {
+  if (doc.documentElement.dataset.brBlanksCollapsed) return;
+  doc.documentElement.dataset.brBlanksCollapsed = '1';
+  doc.querySelectorAll('p').forEach(p => {
+    if (p.textContent.trim() === '' && !p.querySelector('img, svg, video, audio')) {
+      p.dataset.brBlank = '1';
+    }
+  });
+}
+
+function reapplyStyles() {
+  if (!_cxReader) return;
+  _cxMeasureViewerInset(); // re-measure in case status bar height changed with new settings
+  _cxReader.reapplyCss(buildEpubCss());
+}
+
+// ── Sleep timer ───────────────────────────────────────────────────────────────
+let _sleepTimerTimeout  = null;
+let _sleepTimerInterval = null;
+let _sleepTimerEnd      = 0;
+let _sleepPanelInterval = null; // updates remaining display while panel is open
+
+function _updateOpenPanelRemaining() {
+  const remainingEl = document.getElementById('sleep-timer-remaining');
+  if (!remainingEl) return;
+  const ms = Math.max(0, _sleepTimerEnd - Date.now());
+  const m  = Math.floor(ms / 60000);
+  const s  = Math.floor((ms % 60000) / 1000);
+  remainingEl.textContent = m + ':' + String(s).padStart(2, '0');
+}
+
+function openSleepTimerPanel() {
+  const panel    = document.getElementById('sleep-timer-panel');
+  const backdrop = document.getElementById('sleep-timer-backdrop');
+  if (!panel) return;
+  const remainingEl = document.getElementById('sleep-timer-remaining');
+  const cancelBtn   = document.getElementById('sleep-timer-cancel-btn');
+  if (_sleepTimerTimeout) {
+    _updateOpenPanelRemaining();
+    if (remainingEl) remainingEl.style.display = '';
+    if (cancelBtn) cancelBtn.style.display = '';
+    clearInterval(_sleepPanelInterval);
+    _sleepPanelInterval = setInterval(_updateOpenPanelRemaining, 1000);
+  } else {
+    if (remainingEl) remainingEl.style.display = 'none';
+    if (cancelBtn) cancelBtn.style.display = 'none';
+  }
+  panel.classList.add('open');
+  backdrop?.classList.add('open');
+}
+
+function closeSleepTimerPanel() {
+  const panel    = document.getElementById('sleep-timer-panel');
+  const backdrop = document.getElementById('sleep-timer-backdrop');
+  if (panel) panel.classList.remove('open');
+  backdrop?.classList.remove('open');
+  clearInterval(_sleepPanelInterval);
+  _sleepPanelInterval = null;
+}
+
+function _updateSleepTimerBadge() {
+  const badge = document.getElementById('sleep-timer-badge');
+  const btn   = document.getElementById('btn-sleep-timer');
+  if (!badge || !btn) return;
+  if (!_sleepTimerTimeout) {
+    badge.classList.add('hidden');
+    btn.classList.remove('sleep-timer-active');
+    return;
+  }
+  const remaining = Math.max(0, _sleepTimerEnd - Date.now());
+  const m = Math.floor(remaining / 60000);
+  const s = Math.floor((remaining % 60000) / 1000);
+  badge.textContent = m > 0 ? m + 'm' : s + 's';
+  badge.classList.remove('hidden');
+  btn.classList.add('sleep-timer-active');
+}
+
+function startSleepTimer(minutes) {
+  if (_sleepTimerTimeout) cancelSleepTimer();
+  const action = document.querySelector('input[name="sleep-action"]:checked')?.value || 'dim';
+  _sleepTimerEnd = Date.now() + minutes * 60 * 1000;
+  _sleepTimerTimeout  = setTimeout(() => _fireSleepTimer(action), minutes * 60 * 1000);
+  _sleepTimerInterval = setInterval(_updateSleepTimerBadge, 1000);
+  _updateSleepTimerBadge();
+  closeSleepTimerPanel();
+}
+
+function cancelSleepTimer() {
+  clearTimeout(_sleepTimerTimeout);
+  clearInterval(_sleepTimerInterval);
+  _sleepTimerTimeout  = null;
+  _sleepTimerInterval = null;
+  _sleepTimerEnd      = 0;
+  _updateSleepTimerBadge();
+}
+
+function _fireSleepTimer(action) {
+  cancelSleepTimer();
+  if (action === 'dim') {
+    const overlay = document.getElementById('sleep-dim-overlay');
+    if (overlay) {
+      overlay.dataset.hint = t('reader.sleep_dim_hint');
+      overlay.style.display = 'flex';
+      overlay.addEventListener('click', () => { overlay.style.display = 'none'; }, { once: true });
+    }
+  } else if (action === 'close') {
+    void returnToLibrary();
+  } else if (action === 'wake') {
+    prefs.keepScreenOn = false;
+    savePrefs();
+    const el = document.getElementById('keep-screen-on-toggle');
+    if (el) el.checked = false;
+    void releaseWakeLock();
+  }
+}
+
+// ── Wake Lock (keep screen always on) ───────────────────────────────────────
+let wakeLock = null;
+async function acquireWakeLock() {
+  log('[reader] acquireWakeLock keepScreenOn:', prefs.keepScreenOn, 'hasAPI:', 'wakeLock' in navigator);
+  if (!prefs.keepScreenOn || !('wakeLock' in navigator)) return;
+  log('[reader] wakeLock requesting screen...');
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    log('[reader] wakeLock acquired');
+  } catch (e) {
+    warn('[reader] wakeLock error:', e?.message);
+  }
+}
+async function releaseWakeLock() {
+  if (!wakeLock) return;
+  try { await wakeLock.release(); } catch { /* ignore */ }
+  wakeLock = null;
+}
+// Re-acquire after tab becomes visible again (wake lock is auto-released on hide).
+// Also re-check KOSync on wake: the device may have slept (e.g. e-reader cover closed,
+// Wi-Fi off) while another device advanced the reading position. The 'online' event is
+// unreliable after the WebView is frozen, so the wake/visibility path drives the pull.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    acquireWakeLock();
+    scheduleWakeSync();
+    // Rotation on hide (below) always tries to start a fresh session right away, but that start
+    // call isn't guaranteed to finish if the page was actually closing rather than just
+    // backgrounding — re-establish one here if it didn't, so reading after a wake isn't silently
+    // untracked until the next checkpoint.
+    if (currentBook && isReady && !statsSessionId) startStatsSession(currentBook.id);
+  }
+  if (document.visibilityState === 'hidden') {
+    writeInterruptedSession();
+    // Same rationale as the manual sync actions (see #kosync-zone-br/#btn-sync): checkpoint the
+    // current reading session now, since 'hidden' is the one reliable signal that fires right
+    // when an e-reader cover closes or a tab is killed — before the connection actually drops.
+    rotateStatsSession({ background: true });
+  }
+});
+
+// ── Host page background ──────────────────────────────────────────────────────
+
+/** Convert a 6-digit hex colour + alpha (0–1) to an rgba() string. */
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function applyUiTheme() {
+  let theme, ui;
+  if (prefs.theme === 'custom') {
+    const c = deriveCustomPalette(prefs.customBg || '#000000', prefs.customText || '#c8b89a');
+    theme = c.theme; ui = c.ui;
+  } else {
+    theme = THEMES[prefs.theme] || THEMES.dark;
+    ui    = THEME_UI[prefs.theme] || THEME_UI.dark;
+  }
+  const safeAreaFill = document.getElementById('safe-area-fill');
+
+  if (prefs.eink) {
+    document.documentElement.setAttribute('data-reader-eink', '');
+    // E-ink: force pure black-on-white (or white-on-black) for the whole shell
+    const bg   = theme.bg === '#000000' || theme.bg === '#000' || theme.bg === 'black' ? '#000' : '#fff';
+    const text = bg === '#fff' ? '#000' : '#fff';
+    document.documentElement.style.setProperty('--reader-page-bg',    bg);
+    document.documentElement.style.setProperty('--color-bg',          bg);
+    document.documentElement.style.setProperty('--color-surface',     bg);
+    document.documentElement.style.setProperty('--color-surface2',    bg === '#fff' ? '#f3f3f3' : '#111111');
+    document.documentElement.style.setProperty('--color-text',        text);
+    document.documentElement.style.setProperty('--color-text-muted',  text);
+    document.documentElement.style.setProperty('--color-border',      text);
+    document.documentElement.style.setProperty('--color-accent',      text);
+    document.documentElement.style.setProperty('--reader-header-bg',          bg);
+    document.documentElement.style.setProperty('--reader-header-border',      text);
+    document.documentElement.style.setProperty('--reader-header-text',        text);
+    document.documentElement.style.setProperty('--reader-header-text-muted',  text);
+    if (safeAreaFill) safeAreaFill.style.background = bg;
+    epubViewer.style.background = bg;
+  } else {
+    document.documentElement.removeAttribute('data-reader-eink');
+    // Apply full reader-theme palette to all shell UI (panels, sidebars, inputs …)
+    document.documentElement.style.setProperty('--reader-page-bg',    theme.bg);
+    document.documentElement.style.setProperty('--color-bg',          ui.bg);
+    document.documentElement.style.setProperty('--color-surface',     ui.surface);
+    document.documentElement.style.setProperty('--color-surface2',    ui.surface2);
+    document.documentElement.style.setProperty('--color-border',      ui.border);
+    document.documentElement.style.setProperty('--color-text',        ui.text);
+    document.documentElement.style.setProperty('--color-text-muted',  ui.textMuted);
+    document.documentElement.style.setProperty('--color-accent',      ui.accent);
+    document.documentElement.style.setProperty('--color-accent-dark', ui.accentDark);
+    // document.documentElement.style.setProperty('--shadow',            ui.shadow);
+    // --shadow is controlled by applyPageShadow() to respect the spine-shadow toggle
+    // Header: translucent glass tinted to the page colour. The frosted effect needs
+    // backdrop-filter (Chrome 76+); on older WebViews that lack it a translucent
+    // header just lets the status bar / page text bleed through, so fall back to a
+    // fully opaque header there.
+    const headerAlpha = (window.CSS && CSS.supports &&
+      (CSS.supports('backdrop-filter', 'blur(2px)') ||
+       CSS.supports('-webkit-backdrop-filter', 'blur(2px)'))) ? 0.6 : 1;
+    const headerBg    = hexToRgba(theme.bg,   headerAlpha);
+    const headerBdr   = hexToRgba(theme.text, 0.12);
+    const headerMuted = hexToRgba(theme.text, 0.55);
+    document.documentElement.style.setProperty('--reader-header-bg',          headerBg);
+    document.documentElement.style.setProperty('--reader-header-border',      headerBdr);
+    document.documentElement.style.setProperty('--reader-header-text',        theme.text);
+    document.documentElement.style.setProperty('--reader-header-text-muted',  headerMuted);
+    // Safe-area fill: solid (opaque) page colour so the translucent header doesn't leak through
+    if (safeAreaFill) safeAreaFill.style.background = theme.bg;
+    epubViewer.style.background = theme.bg;
+  }
+  applyPageShadow();
+  // Tag body with current theme name so CSS can target per-theme overrides.
+  document.body.dataset.readerTheme = prefs.theme;
+  // SVGs loaded as <img> can't use currentColor — drive icon appearance via filter.
+  // Dark themes need icons inverted (dark SVG → light); light/sepia themes need none.
+  const needsIconInvert = prefs.theme === 'custom'
+    ? hexLuminance(prefs.customBg || '#000000') < 0.4
+    : ['dark', 'midnight', 'nord'].includes(prefs.theme);
+  document.documentElement.style.setProperty('--nav-icon-filter', needsIconInvert ? 'brightness(0) invert(1)' : 'none');
+  // Update custom theme button preview colors
+  const customBtn = document.querySelector('.theme-btn.theme-custom');
+  if (customBtn) {
+    customBtn.style.background = prefs.customBg || '#000000';
+    customBtn.style.color = prefs.customText || '#c8b89a';
+  }
+}
+
+/*
+function applyPageShadow() {
+  document.getElementById('page-edge-shadow')?.classList.toggle('active', !!prefs.pageGapShadow);
+}*/
+
+function applyPageShadow() {
+  const on = !!prefs.pageGapShadow;
+  document.body.classList.toggle('page-gap-shadow-on', on);
+  const ui = THEME_UI[prefs.theme] || THEME_UI.dark;
+  // Keep --shadow deterministic (avoid falling back to :root defaults from main.css).
+  // But disable shadows entirely in e-ink mode.
+  if (prefs.eink) {
+    document.documentElement.style.setProperty('--shadow', 'none');
+  } else {
+    document.documentElement.style.setProperty('--shadow', ui.shadow);
+  }
+}
+
+// ── FIX: Forward iframe keydown events to host ────────────────────────────────
+const IFRAME_NAV_KEYS = new Set(['ArrowRight', 'ArrowLeft', ' ', 'PageDown', 'PageUp']);
+
+function attachIframeKeyboard(contents) {
+  if (!contents?.window) return;
+  // Capture phase + preventDefault stops epub.js from also turning the page when we
+  // handle navigation keys here (avoids double page-turn on e-ink Page Up/Down).
+  contents.window.addEventListener('keydown', (e) => {
+    if (IFRAME_NAV_KEYS.has(e.key)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') goPrev();
+      else goNext();
+      return;
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: e.key, bubbles: true }));
+  }, true);
+  // Forward wheel events from iframe so mouseWheelNav works when cursor is over text
+  contents.window.addEventListener('wheel', (e) => {
+    if (!prefs.mouseWheelNav) return;
+    document.dispatchEvent(new CustomEvent('br-wheel', { detail: { deltaY: e.deltaY } }));
+  }, { passive: true });
+}
+
+// Inject long-press (mobile) and right-click (desktop) dictionary lookup
+// into each epub.js iframe page. Uses postMessage to ask the host to show the popup.
+function attachIframeDictionary(contents) {
+  if (!contents?.document || !contents?.window) return;
+  const doc = contents.document;
+  const win = contents.window;
+  const coarsePointer = !!win.matchMedia?.('(pointer: coarse)')?.matches;
+  let pressTimer = null, pressX = 0, pressY = 0, selectionTimer = null, lastSelectionWord = '', lastSelectionTs = 0;
+
+  // iOS: suppress native callout and text-selection takeover inside epub iframes.
+  if (isIOS) {
+    const iosStyle = doc.createElement('style');
+    iosStyle.textContent = '* { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }';
+    (doc.head || doc.documentElement).appendChild(iosStyle);
+  }
+
+  function getWordAtPoint(x, y) {
+    let node, offset;
+    if (doc.caretRangeFromPoint) {
+      const r = doc.caretRangeFromPoint(x, y);
+      if (!r) return '';
+      node = r.startContainer; offset = r.startOffset;
+    } else if (doc.caretPositionFromPoint) {
+      const p = doc.caretPositionFromPoint(x, y);
+      if (!p) return '';
+      node = p.offsetNode; offset = p.offset;
+    } else return '';
+    if (node?.nodeType === 1) {
+      const walker = doc.createTreeWalker(node, 0x4);
+      const t = walker.nextNode();
+      if (t) { node = t; offset = 0; }
+    }
+    if (!node || node.nodeType !== 3) return '';
+    const text = node.textContent;
+    let s = offset, e = offset;
+    while (s > 0 && /[\p{L}\p{N}'\u2019\-]/u.test(text[s - 1])) s--;
+    while (e < text.length && /[\p{L}\p{N}'\u2019\-]/u.test(text[e])) e++;
+    return text.slice(s, e).replace(/^['\u2019\-]+|['\u2019\-]+$/g, '').trim();
+  }
+
+  function getWordRangeAtPoint(x, y) {
+    let node, offset;
+    if (doc.caretRangeFromPoint) {
+      const r = doc.caretRangeFromPoint(x, y);
+      if (!r) return null;
+      node = r.startContainer; offset = r.startOffset;
+    } else if (doc.caretPositionFromPoint) {
+      const p = doc.caretPositionFromPoint(x, y);
+      if (!p) return null;
+      node = p.offsetNode; offset = p.offset;
+    } else return null;
+    if (node?.nodeType === 1) {
+      const walker = doc.createTreeWalker(node, 0x4);
+      const t = walker.nextNode();
+      if (t) { node = t; offset = 0; }
+    }
+    if (!node || node.nodeType !== 3) return null;
+    const text = node.textContent;
+    let s = offset, e = offset;
+    while (s > 0 && /[\p{L}\p{N}'\u2019\-]/u.test(text[s - 1])) s--;
+    while (e < text.length && /[\p{L}\p{N}'\u2019\-]/u.test(text[e])) e++;
+    const word = text.slice(s, e).replace(/^['\u2019\-]+|['\u2019\-]+$/g, '').trim();
+    if (!word) return null;
+    try {
+      const range = doc.createRange();
+      range.setStart(node, s);
+      range.setEnd(node, e);
+      return { word, range };
+    } catch { return null; }
+  }
+
+  function triggerSelectionLookup() {
+    const sel = win.getSelection?.();
+    const raw = (sel?.toString() || '').trim();
+    if (!raw) return;
+    const word = raw.split(/\s+/)[0].replace(/^['\u2019\-]+|['\u2019\-]+$/g, '').trim();
+    if (!word) return;
+    const now = Date.now();
+    if (word === lastSelectionWord && now - lastSelectionTs < 900) return;
+    lastSelectionWord = word;
+    lastSelectionTs = now;
+    window.parent.postMessage({ type: 'dict-lookup', word }, '*');
+  }
+
+  doc.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    pressX = t.clientX;
+    pressY = t.clientY;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      suppressNextTap = true;
+      const result = getWordRangeAtPoint(pressX, pressY);
+      if (!result) return;
+      const { word, range } = result;
+      // If the tapped word is inside an existing annotation mark, open its edit sheet
+      const _tappedNode = range.commonAncestorContainer;
+      const _existingMark = (_tappedNode.nodeType === 3 ? _tappedNode.parentElement : _tappedNode)
+        ?.closest?.('mark[data-annot-id]');
+      if (_existingMark) {
+        const _annotId = parseInt(_existingMark.dataset.annotId);
+        if (!isNaN(_annotId)) {
+          window.parent.postMessage({ type: 'annotation-click', id: _annotId }, '*');
+          return;
+        }
+      }
+      win.getSelection?.()?.removeAllRanges?.();
+      let cfiRange = '';
+      if (prefs.bionicReading) {
+        // Bionic DOM shifts CFI paths — generate a clean CFI from the pre-bionic structure
+        cfiRange = cfiFromBionicRange(range, doc, contents) || '';
+      } else {
+        try { cfiRange = contents.cfiFromRange(range); } catch {}
+      }
+      // Highlight the pressed word — CFI already captured, safe to modify DOM now
+      clearTimeout(_clearHlTimer); _clearHlTimer = null;
+      try {
+        const hl = doc.createElement('mark');
+        hl.className = 'br-press-hl';
+        range.surroundContents(hl);
+      } catch { /* range spans element boundary, skip visual highlight */ }
+      if (cfiRange) {
+        window.parent.postMessage({ type: 'annotation-select', cfiRange, text: word }, '*');
+      } else {
+        window.parent.postMessage({ type: 'dict-lookup', word }, '*');
+      }
+    }, 450);
+  }, { passive: true });
+
+  doc.addEventListener('touchmove', (e) => {
+    if (Math.abs(e.touches[0].clientX - pressX) > 18 || Math.abs(e.touches[0].clientY - pressY) > 18) {
+      clearTimeout(pressTimer); pressTimer = null;
+    }
+  }, { passive: true });
+
+  doc.addEventListener('touchend', () => {
+    if (pressTimer !== null) { clearTimeout(pressTimer); pressTimer = null; }
+  }, { passive: true });
+
+  doc.addEventListener('touchcancel', () => { clearTimeout(pressTimer); pressTimer = null; }, { passive: true });
+
+  if (coarsePointer && !isIOS) {
+    // Fire dict lookup on pointer release, not during drag. selectionchange fires continuously
+    // while the user drags to select text (triggering lookup mid-drag); mouseup/touchend only
+    // fires when the user stops, which is the moment they expect the lookup.
+    const _onSelEnd = () => {
+      clearTimeout(selectionTimer);
+      selectionTimer = setTimeout(triggerSelectionLookup, 120);
+    };
+    doc.addEventListener('mouseup', _onSelEnd);
+    doc.addEventListener('touchend', _onSelEnd, { passive: true });
+  }
+
+  doc.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const sel     = win.getSelection?.();
+    const selText = sel?.toString().trim();
+    const word    = selText ? selText.split(/\s+/)[0] : getWordAtPoint(e.clientX, e.clientY);
+    if (word) window.parent.postMessage({ type: 'dict-lookup', word }, '*');
+  });
+
+  if (!coarsePointer) {
+    doc.addEventListener('dblclick', (e) => {
+      // Skip if the mouse button is still held — user is double-click-dragging to extend a
+      // selection, not looking up a word. Let mouseup → annotation toolbar handle that case.
+      if (e.buttons & 1) return;
+      clearTimeout(_annotToolbarTimer); _annotToolbarTimer = null;
+      const sel = win.getSelection?.();
+      const selText = sel?.toString().trim();
+      const word = selText ? selText.split(/\s+/)[0] : getWordAtPoint(e.clientX, e.clientY);
+      if (word) window.parent.postMessage({ type: 'dict-lookup', word }, '*');
+    });
+  }
+}
+
+
+
+function isFootnoteLink(anchor) {
+  const rawHref = anchor.dataset?.footnoteHref || anchor.dataset?.brLinkHref || anchor.getAttribute('href') || '';
+  if (!rawHref.includes('#')) return false;
+
+  // EPUB3 explicit attributes
+  const epubType = (anchor.getAttribute('epub:type') ||
+    anchor.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type') || '').toLowerCase();
+  const role = (anchor.getAttribute('role') || '').toLowerCase();
+  if (epubType.includes('noteref') || role.includes('doc-noteref')) return true;
+
+  // Parent is <sup> — common pattern
+  if (anchor.parentElement?.tagName === 'SUP') return true;
+
+  // Anchor CONTAINS a <sup> — e.g. <a href="notes.html#fn"><sup>1</sup></a>
+  if (anchor.querySelector('sup')) return true;
+
+  // Class hint on anchor or its parent
+  const cls = ((anchor.className || '') + ' ' + (anchor.parentElement?.className || '')).toLowerCase();
+  if (/\b(foot|fn|note|ref)\b/.test(cls)) return true;
+
+  // Inspect target element
+  const fragId = rawHref.split('#').pop();
+  if (fragId) {
+    const target = anchor.ownerDocument.getElementById(fragId);
+    if (target) {
+      const tt = (target.getAttribute('epub:type') ||
+        target.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type') || '').toLowerCase();
+      const tr = (target.getAttribute('role') || '').toLowerCase();
+      if (/footnote|endnote/.test(tt) || /doc-footnote|doc-endnote/.test(tr)) return true;
+      if (target.tagName === 'ASIDE') return true;
+      // Short footnote marker (*, †, single digit, etc.) linking to a same-doc target
+      const markerText = (anchor.textContent || '').trim();
+      if (markerText.length <= 3) return true;
+    }
+  }
+  return false;
+}
+
+// Inject footnote-link click interception into each epub.js iframe page.
+// Uses capture phase so we intercept before epub.js handles the click.
+function attachIframeFootnotes(contents) {
+  if (!contents?.document) return;
+  const doc = contents.document;
+
+  // Remove href from footnote links so desktop browsers don't show URLs on hover.
+  // Keep original target in data-footnote-href and preserve keyboard focusability.
+  doc.querySelectorAll('a').forEach((anchor) => {
+    if (!isFootnoteLink(anchor)) return;
+    const rawHref = anchor.dataset?.brLinkHref || anchor.getAttribute('href') || '';
+    if (!rawHref) return;
+    anchor.dataset.footnoteHref = rawHref;
+    anchor.removeAttribute('href');
+    anchor.setAttribute('role', 'button');
+    anchor.setAttribute('tabindex', '0');
+    anchor.style.cursor = 'pointer';
+  });
+
+  const openFootnote = (anchor, e) => {
+    const rawHref = anchor.dataset.footnoteHref || anchor.dataset.brLinkHref || anchor.getAttribute('href') || '';
+    if (!rawHref.includes('#')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const fragId  = rawHref.split('#').pop();
+    // treat as same-doc if href is a bare fragment OR if the target id exists in the current iframe doc
+    const sameDoc = rawHref.startsWith('#') || !!anchor.ownerDocument.getElementById(fragId);
+    window.parent.postMessage({ type: 'footnote-show', rawHref, fragId, sameDoc }, '*');
+  };
+
+  doc.addEventListener('click', (e) => {
+    const anchor = e.target.closest('a[data-footnote-href], a[href]');
+    if (!anchor) return;
+    if (!anchor.dataset.footnoteHref && !isFootnoteLink(anchor)) return;
+    openFootnote(anchor, e);
+  }, { capture: true });
+
+  doc.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const anchor = e.target?.closest?.('a[data-footnote-href]');
+    if (!anchor) return;
+    openFootnote(anchor, e);
+  }, { capture: true });
+}
+
+// Strip epub backlinks and dangerous content from a cloned footnote element.
+// Returns innerHTML string, or null if nothing meaningful remains.
+function _sanitizeFootnoteHtml(el) {
+  const clone = el.cloneNode(true);
+  // Remove semantic backlinks
+  clone.querySelectorAll('[epub\\:type="backlink"], [role="doc-backlink"]').forEach(n => n.remove());
+  // Remove bare back-arrow anchors
+  clone.querySelectorAll('a').forEach(a => {
+    if (/^[↩↑\^⬆←▲🔙]$/.test(a.textContent.trim())) a.remove();
+  });
+  // Remove scripts and on* attributes
+  clone.querySelectorAll('script').forEach(n => n.remove());
+  clone.querySelectorAll('*').forEach(n => {
+    for (const attr of [...n.attributes]) {
+      if (attr.name.startsWith('on')) n.removeAttribute(attr.name);
+    }
+  });
+  const html = clone.innerHTML.trim();
+  return html || null;
+}
+
+async function showFootnotePopup(fragId, crossDocHref) {
+  let targetEl = null;
+  if (_cxReader) {
+    if (!crossDocHref) {
+      // Same-doc: element is already in the rendered iframe
+      targetEl = _cxReader._renderer?.iframe?.contentDocument?.getElementById(fragId) ?? null;
+    } else {
+      // Cross-doc: find spine item by href and fetch its content via blob URL
+      const crossPath = crossDocHref.split('#')[0];
+      const crossFile = crossPath.split('/').pop();
+      const spineItem = _cxReader._book?.spine?.find(s => {
+        const sh = (s.absPath || s.href || '').split('#')[0];
+        return sh === crossPath || sh.split('/').pop() === crossFile;
+      });
+      if (spineItem?.blobUrl) {
+        try {
+          const html = await fetch(spineItem.blobUrl).then(r => r.text());
+          const doc  = new DOMParser().parseFromString(html, 'text/html');
+          targetEl   = doc.getElementById(fragId) ?? null;
+        } catch { targetEl = null; }
+      }
+    }
+  }
+  if (!targetEl) return;
+
+  // If the id lands on an inline element (e.g. a backlink <a>), use the nearest block ancestor
+  const BLOCK_TAGS = new Set(['P','DIV','LI','SECTION','ASIDE','BLOCKQUOTE','DD','DT','ARTICLE']);
+  if (!BLOCK_TAGS.has(targetEl.tagName)) {
+    const blockParent = targetEl.closest('p,li,div,section,aside,blockquote,dd,dt,article');
+    if (blockParent) targetEl = blockParent;
+  }
+
+  const html = _sanitizeFootnoteHtml(targetEl);
+  if (!html) return;
+
+  const popup   = document.getElementById('footnote-popup');
+  const content = document.getElementById('footnote-popup-content');
+  if (!popup || !content) return;
+
+  content.innerHTML = html;
+  // Sanitize links in the rendered content
+  content.querySelectorAll('a[href]').forEach(a => {
+    const h = a.getAttribute('href') || '';
+    if (h.startsWith('http://') || h.startsWith('https://')) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    } else {
+      a.replaceWith(document.createTextNode(a.textContent));
+    }
+  });
+  popup.classList.add('open');
+  document.getElementById('footnote-backdrop')?.classList.add('open');
+}
+
+function closeFootnotePopup() {
+  document.getElementById('footnote-popup')?.classList.remove('open');
+  document.getElementById('footnote-backdrop')?.classList.remove('open');
+}
+
+// ── Annotations ───────────────────────────────────────────────────────────────
+
+function attachIframeAnnotation(contents) {
+  if (!contents?.document) return;
+  const doc = contents.document;
+  function onSelectionEnd(e) {
+    if (e?.button !== undefined && e.button !== 0) return; // ignore right/middle clicks
+    const sel = doc.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+    const text = sel.toString().trim();
+    if (text.length < 2) return;
+    let cfiRange;
+    if (prefs.bionicReading) {
+      cfiRange = cfiFromBionicRange(sel.getRangeAt(0), doc, contents);
+    } else {
+      try { cfiRange = contents.cfiFromRange(sel.getRangeAt(0)); } catch { return; }
+    }
+    if (!cfiRange) return;
+    clearTimeout(_annotToolbarTimer);
+    _annotToolbarTimer = setTimeout(() => {
+      window.parent.postMessage({ type: 'annotation-select', cfiRange, text }, '*');
+    }, 300);
+  }
+  doc.addEventListener('mouseup', onSelectionEnd);
+  doc.addEventListener('touchend', () => setTimeout(() => onSelectionEnd(), 50));
+}
+
+// Generate a CFI compatible with the non-bionic DOM, even when bionic is currently active.
+// Bionic wraps word prefixes in <span.br-bionic-word> elements, changing the DOM tree but
+// not the text content. We temporarily unwrap those spans to get the "original" node structure,
+// generate the CFI, then restore the block's innerHTML.
+function cfiFromBionicRange(range, doc, contents) {
+  // Walk up to the nearest ancestor that is not itself a bionic span
+  let block = range.commonAncestorContainer;
+  if (block.nodeType !== 1) block = block.parentNode;
+  while (block && block !== doc.body) {
+    if (!block.classList?.contains('br-bionic-word') && !block.classList?.contains('br-bionic-focus')) break;
+    block = block.parentNode;
+  }
+  if (!block || block === doc.documentElement) return null;
+
+  // Compute char offsets within the block — text content is the same in bionic and clean DOM
+  let startChar, endChar;
+  try {
+    const r1 = doc.createRange();
+    r1.setStart(block, 0);
+    r1.setEnd(range.startContainer, range.startOffset);
+    startChar = r1.toString().length;
+    const r2 = doc.createRange();
+    r2.setStart(block, 0);
+    r2.setEnd(range.endContainer, range.endOffset);
+    endChar = r2.toString().length;
+  } catch { return null; }
+
+  // Snapshot HTML before modification (preserves existing annotation <mark>s and bionic spans)
+  const savedHTML = block.innerHTML;
+
+  // Replace every bionic word-span with a plain text node of its text content
+  Array.from(block.querySelectorAll('.br-bionic-word')).forEach(span => {
+    span.parentNode.replaceChild(doc.createTextNode(span.textContent), span);
+  });
+  block.normalize(); // merge adjacent text nodes → reproduces original node structure
+
+  // Rebuild the selection range at the same char offsets in the now-clean block
+  let cfi = null;
+  try {
+    const walker = doc.createTreeWalker(block, 0x4 /* SHOW_TEXT */);
+    let pos = 0, sn = null, so = 0, en = null, eo = 0, node;
+    while ((node = walker.nextNode())) {
+      const len = node.length;
+      if (!sn && pos + len > startChar) { sn = node; so = startChar - pos; }
+      if (sn && pos + len >= endChar)   { en = node; eo = endChar   - pos; break; }
+      pos += len;
+    }
+    if (sn && en) {
+      const cleanRange = doc.createRange();
+      cleanRange.setStart(sn, so);
+      cleanRange.setEnd(en, eo);
+      cfi = contents.cfiFromRange(cleanRange);
+    }
+  } catch { /* ignore */ }
+
+  // Restore original markup (bionic spans + any pre-existing annotation marks)
+  block.innerHTML = savedHTML;
+
+  // innerHTML restore kills event listeners — re-attach click handlers to existing marks
+  block.querySelectorAll('mark[data-annot-id]').forEach(mark => {
+    const id = parseInt(mark.dataset.annotId);
+    if (!id) return;
+    mark.addEventListener('click', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      window.parent.postMessage({ type: 'annotation-click', id }, '*');
+    }, { capture: true });
+  });
+
+  return cfi;
+}
+
+// Find the first occurrence of text in the page by walking text nodes.
+// Used as a CFI fallback when bionic mode causes CFI path mismatches.
+function findTextRangeInPage(doc, text) {
+  if (!text || !doc.body) return null;
+  const bodyText = doc.body.textContent;
+  const idx = bodyText.indexOf(text);
+  if (idx < 0) return null;
+  const end = idx + text.length;
+  const walker = doc.createTreeWalker(doc.body, 0x4 /* SHOW_TEXT */);
+  let pos = 0, sn = null, so = 0, en = null, eo = 0, node;
+  while ((node = walker.nextNode())) {
+    const len = node.length;
+    if (!sn && pos + len > idx)  { sn = node; so = idx - pos; }
+    if (sn && pos + len >= end)  { en = node; eo = end - pos; break; }
+    pos += len;
+  }
+  if (!sn || !en) return null;
+  try {
+    const r = doc.createRange();
+    r.setStart(sn, so);
+    r.setEnd(en, eo);
+    return r;
+  } catch { return null; }
+}
+
+function showAnnotationToolbar(cfiRange, text) {
+  _pendingAnnotation = { cfiRange, text };
+  updateDictButtonVisibility();
+  document.getElementById('annot-toolbar')?.classList.add('open');
+  document.getElementById('annot-backdrop')?.classList.add('open');
+}
+
+function clearPressHighlight() {
+  const clean = (c) => {
+    try {
+      c.document?.querySelectorAll('mark.br-press-hl').forEach(m => {
+        while (m.firstChild) m.parentNode.insertBefore(m.firstChild, m);
+        m.remove();
+      });
+    } catch { /* ignore */ }
+    try { c.window?.getSelection?.()?.removeAllRanges?.(); } catch { /* ignore */ }
+  };
+  if (_cxReader?.iframe?.contentDocument) {
+    clean({ document: _cxReader.iframe.contentDocument, window: _cxReader.iframe.contentWindow });
+  }
+}
+
+function scheduleClearPressHighlight() {
+  clearTimeout(_clearHlTimer);
+  _clearHlTimer = setTimeout(clearPressHighlight, WORD_HIGHLIGHT_LINGER_MS);
+}
+
+// Navigate to a CFI via CXReader, then scroll to the specific annotation mark.
+async function navigateToCfi(cfi, annotationId = null) {
+  if (!_cxReader) return;
+  await _cxReader.goToCfi(cfi);
+  // Scroll to specific annotation mark. Prefer the explicit annotationId (avoids wrong-mark
+  // when multiple annotations in the same chapter share a spine-level CFI), fall back to
+  // CFI-match for annotations that have real range CFIs.
+  const targetId = annotationId ?? annotationsCache.find(a => a.cfi === cfi)?.id;
+  if (targetId != null) _cxReader.scrollToAnnotation(targetId);
+}
+
+function closeAnnotationUI() {
+  closeAnnotationToolbar();
+  closeAnnotationNoteEditor();
+  closeAnnotationEditSheet();
+}
+
+function closeAnnotationToolbar(keepHighlight = false) {
+  _pendingAnnotation = null;
+  document.getElementById('annot-toolbar')?.classList.remove('open');
+  document.getElementById('annot-backdrop')?.classList.remove('open');
+  if (!keepHighlight) scheduleClearPressHighlight();
+}
+
+function showAnnotationNoteEditor(annotationId, existingNote, initialColor = null) {
+  _editingAnnotationId = annotationId;
+  _pendingNoteColor = initialColor
+    || (annotationId != null ? (annotationsCache.find(x => x.id === annotationId)?.color || 'yellow') : 'yellow');
+  document.querySelectorAll('.annot-note-color-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.color === _pendingNoteColor);
+  });
+  const ta = document.getElementById('annot-note-text');
+  if (ta) ta.value = existingNote || '';
+  document.getElementById('annot-note-editor')?.classList.add('open');
+  document.getElementById('annot-backdrop')?.classList.add('open');
+  ta?.focus();
+}
+
+function closeAnnotationNoteEditor() {
+  _editingAnnotationId = null;
+  document.getElementById('annot-note-editor')?.classList.remove('open');
+  document.getElementById('annot-backdrop')?.classList.remove('open');
+  scheduleClearPressHighlight();
+}
+
+// Inject <mark> elements for all cached annotations that belong to this contents view.
+// Called from injectIntoContents on every page render.
+function injectAnnotationsIntoContents(contents) {
+  if (!contents?.document || !annotationsCache.length) return;
+  const doc = contents.document;
+  const contentsSpineIdx = contents.sectionIndex ?? currentSpineIndex;
+  annotationsCache.forEach(a => {
+    if (doc.querySelector(`mark[data-annot-id="${a.id}"]`)) return; // already injected
+    const annotSpineIdx = spineIndexFromCfi(a.cfi);
+    if (annotSpineIdx !== null && annotSpineIdx !== contentsSpineIdx) return;
+    try {
+      // Resolve CFI to a range; verify it matched the expected text to detect bionic mismatch
+      let range = null;
+      try { range = contents.range(a.cfi); } catch { /* not on this page */ }
+      if (range && a.text) {
+        const resolved = range.toString().replace(/\s+/g, ' ').trim();
+        const expected = a.text.replace(/\s+/g, ' ').trim();
+        if (resolved !== expected) range = null; // bionic/non-bionic mode mismatch
+      }
+      // Fall back to text search within the page (handles bionic ↔ non-bionic CFI mismatches)
+      if (!range && a.text) range = findTextRangeInPage(doc, a.text);
+      if (!range) return;
+
+      const mark = doc.createElement('mark');
+      mark.className = 'annot-hl annot-' + a.color + (a.note ? ' has-note' : '');
+      mark.dataset.annotId = String(a.id);
+      mark.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        window.parent.postMessage({ type: 'annotation-click', id: a.id }, '*');
+      }, { capture: true });
+      try {
+        range.surroundContents(mark);
+      } catch {
+        // Selection spans element boundary — use extractContents to preserve nesting
+        const frag = range.extractContents();
+        mark.appendChild(frag);
+        range.insertNode(mark);
+      }
+    } catch { /* annotation not on this page, or CFI parse error — skip silently */ }
+  });
+}
+
+// Re-apply annotation marks into all currently loaded views (e.g. after loadAnnotations)
+function reapplyAnnotations() {
+  if (!_cxReader) return;
+  const iframe = _cxReader.iframe;
+  if (iframe?.contentDocument) {
+    const _raDoc = iframe.contentDocument;
+    injectAnnotationsIntoContents({
+      document: _raDoc,
+      sectionIndex: _cxReader.spineIdx,
+      range: (cfi) => _cxRangeFromCfi(cfi, _raDoc),
+    });
+  }
+}
+
+// Call callback(doc) for the currently-loaded CXReader iframe document.
+function forEachAnnotationDoc(callback) {
+  if (_cxReader?.iframe?.contentDocument) {
+    try { callback(_cxReader.iframe.contentDocument); } catch { /* ignore */ }
+  }
+}
+
+// Remove <mark> wrappers for a deleted annotation from all loaded views
+function removeAnnotationFromDom(id) {
+  forEachAnnotationDoc(doc => {
+    doc.querySelectorAll(`mark[data-annot-id="${id}"]`).forEach(m => {
+      while (m.firstChild) m.parentNode.insertBefore(m.firstChild, m);
+      m.remove();
+    });
+  });
+}
+
+function showAnnotationEditSheet(a) {
+  const sheet = document.getElementById('annot-edit-sheet');
+  if (!sheet) return;
+  sheet.dataset.annotId = a.id;
+  // Highlight active color button
+  sheet.querySelectorAll('.annot-edit-color-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.color === a.color);
+  });
+  const noteEl = sheet.querySelector('.annot-edit-note-preview');
+  if (noteEl) noteEl.textContent = a.note || '';
+  sheet.classList.add('open');
+  document.getElementById('annot-backdrop')?.classList.add('open');
+}
+
+function closeAnnotationEditSheet() {
+  document.getElementById('annot-edit-sheet')?.classList.remove('open');
+  document.getElementById('annot-backdrop')?.classList.remove('open');
+}
+
+async function createAnnotation(cfiRange, text, color, note) {
+  if (!currentBook) return;
+  const payload = { cfi: cfiRange, pct: currentPct || 0, color, note: note || '', text };
+  try {
+    const a = await apiFetch(`/annotations/${currentBook.id}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    annotationsCache.push(a);
+  } catch {
+    annotationsCache.push({ id: -(Date.now()), ...payload, offline: true });
+    enqueueOfflineOp(`br_ann_q_${currentBook.id}`, 'create', payload);
+  }
+  try { localStorage.setItem(`br_ann_${currentBook.id}`, JSON.stringify(annotationsCache)); } catch { /* ignore */ }
+  clearTimeout(_clearHlTimer); _clearHlTimer = null;
+  clearPressHighlight();
+  reapplyAnnotations();
+  renderAnnotationList();
+  applyHeaderBtnVisibility();
+  toast.success(t('reader.annotation_added'));
+}
+
+async function updateAnnotation(id, updates) {
+  if (!currentBook) return;
+  const a = annotationsCache.find(x => x.id === id);
+  if (!a) return;
+  try {
+    await apiFetch(`/annotations/${currentBook.id}/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  } catch {
+    if (id > 0) enqueueOfflineOp(`br_ann_q_${currentBook.id}`, 'update', { id, updates });
+  }
+  Object.assign(a, updates);
+  try { localStorage.setItem(`br_ann_${currentBook.id}`, JSON.stringify(annotationsCache)); } catch { /* ignore */ }
+  // Update mark classes in DOM
+  forEachAnnotationDoc(doc => {
+    doc.querySelectorAll(`mark[data-annot-id="${id}"]`).forEach(m => {
+      m.className = 'annot-hl annot-' + a.color + (a.note ? ' has-note' : '');
+    });
+  });
+  renderAnnotationList();
+}
+
+async function deleteAnnotation(id) {
+  if (!currentBook) return;
+  try {
+    await apiFetch(`/annotations/${currentBook.id}/${id}`, { method: 'DELETE' });
+  } catch {
+    if (id > 0) enqueueOfflineOp(`br_ann_q_${currentBook.id}`, 'delete', { id });
+  }
+  annotationsCache = annotationsCache.filter(x => x.id !== id);
+  try { localStorage.setItem(`br_ann_${currentBook.id}`, JSON.stringify(annotationsCache)); } catch { /* ignore */ }
+  removeAnnotationFromDom(id);
+  renderAnnotationList();
+  applyHeaderBtnVisibility();
+  toast.success(t('reader.annotation_deleted'));
+}
+
+// Book percentage for a CFI, using whichever reader engine is active. Returns
+// null when it can't be computed (e.g. locations not generated yet).
+function pctFromCfi(cfi) {
+  if (!cfi) return null;
+  try {
+    if (_cxReader?.pctForCfi) {
+      const p = _cxReader.pctForCfi(cfi);
+      if (p != null) return p;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function loadAnnotations(bookId) {
+  try {
+    annotationsCache = await apiFetch(`/annotations/${bookId}`);
+    try { localStorage.setItem(`br_ann_${bookId}`, JSON.stringify(annotationsCache)); } catch { /* ignore */ }
+  } catch {
+    try { annotationsCache = JSON.parse(localStorage.getItem(`br_ann_${bookId}`) || '[]'); } catch { annotationsCache = []; }
+  }
+  reapplyAnnotations();
+  renderAnnotationList();
+  applyHeaderBtnVisibility();
+}
+
+function renderAnnotationList() {
+  updateAnnotationBadge();
+  const listEl = document.getElementById('annotations-list');
+  if (!listEl) return;
+  if (!annotationsCache.length) {
+    listEl.innerHTML = `<div class="annotations-empty">${t('reader.annotations_empty')}</div>`;
+    return;
+  }
+  listEl.innerHTML = '';
+  // Annotations synced in from BookOrbit carry no percentage (pct=0); derive a
+  // chapter-level location from their CFI so the list sorts and labels correctly.
+  const withPct = annotationsCache.map(a => ({ a, pct: a.pct || pctFromCfi(a.cfi) || 0 }));
+  withPct.sort((x, y) => x.pct - y.pct).forEach(({ a, pct }) => {
+    const item = document.createElement('div');
+    item.className = 'annotation-item';
+    const excerpt = a.text || '';
+    const excerptShort = excerpt.slice(0, 80) + (excerpt.length > 80 ? '…' : '');
+    const noteText = a.note || '';
+    const noteShort = noteText.slice(0, 60) + (noteText.length > 60 ? '…' : '');
+    item.innerHTML = `
+      <div class="annotation-item-body">
+        <span class="annotation-color-dot" style="background:var(--annot-dot-${escapeHtml(a.color)})"></span>
+        <div class="annotation-item-text">
+          <div class="annotation-item-excerpt">${escapeHtml(excerptShort)}</div>
+          ${noteText ? `<div class="annotation-item-note">${escapeHtml(noteShort)}</div>` : ''}
+          <div class="annotation-item-pct">${Math.round(pct * 100)}%</div>
+        </div>
+      </div>
+      <button class="annotation-delete-btn btn-icon-sm" title="${t('reader.annotation_delete')}">🗑</button>`;
+    item.querySelector('.annotation-item-body').addEventListener('click', () => {
+      // Clear any existing bookmark/annotation back+accept buttons first.
+      _clearNavPreJumps();
+      if (currentCfi) {
+        preAnnotationCfi = currentCfi;
+        annotationBackBtn.style.display   = '';
+        annotationAcceptBtn.style.display = '';
+      }
+      closePanels();
+      navigateToCfi(a.cfi, a.id);
+    });
+    item.querySelector('.annotation-delete-btn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await deleteAnnotation(a.id);
+    });
+    listEl.appendChild(item);
+  });
+}
+
+function openAnnotations() {
+  const sidebar = document.getElementById('annotations-sidebar');
+  if (!sidebar) return;
+  sidebar.classList.add('open');
+  tocSidebar.classList.remove('open');
+  settingsPanel.classList.remove('open');
+  bookmarksSidebar.classList.remove('open');
+  panelBackdrop.classList.add('visible');
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+}
+
+// ── Status bar engine ─────────────────────────────────────────────────────────
+
+// Reading speed: record each page turn; ignore gaps > 5 minutes
+function trackReadingSpeed() {
+  if (!isReady) return;
+  const now  = Date.now();
+  const last = speedSamples[speedSamples.length - 1];
+  if (last && now - last.time > 5 * 60 * 1000) speedSamples = [];
+  speedSamples.push({ time: now });
+  if (speedSamples.length > 25) speedSamples = speedSamples.slice(-25);
+}
+
+// Pages per minute based on recent samples
+function getPagesPerMinute() {
+  if (speedSamples.length < 3) return prefs.statusBar.defaultPpm || 1.5;
+  const oldest  = speedSamples[0];
+  const newest  = speedSamples[speedSamples.length - 1];
+  const elapsed = (newest.time - oldest.time) / 60000;
+  if (elapsed < 0.3) return prefs.statusBar.defaultPpm || 1.5;
+  return Math.max(0.05, Math.min(15, (speedSamples.length - 1) / elapsed));
+}
+
+// Format minutes as HH:MM
+function formatEta(pages) {
+  if (!pages || pages <= 0) return '';
+  const ppm   = getPagesPerMinute();
+  if (!ppm) return '';
+  const total = Math.round(pages / ppm);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+
+// Estimated page count for a chapter not yet paginated, proportional to its own content weight
+// (spineWeights — uncompressed file size as a text-length proxy, already computed by CXReader
+// for the content-proportional percentage calc) calibrated against chapters actually paginated
+// so far: pagesPerWeightUnit = (real pages of visited chapters) / (their combined weight),
+// applied to this chapter's own weight. A chapter twice as long by file size is estimated at
+// roughly twice the pages, instead of just "the average of whatever's been visited" — which
+// drifted as the average itself shifted with every newly-visited chapter, causing "pages left"
+// to sometimes barely move (or even tick up) right when crossing a chapter boundary. Falls back
+// to a flat default only when nothing has been visited yet (no ratio to calibrate against).
+function estimateChapPages(spineIndex) {
+  if (chapPageCache[spineIndex] != null) return chapPageCache[spineIndex];
+  const weights = _cxReader?.spineWeights || [];
+  const w = weights[spineIndex] || 1;
+  let visitedPages = 0, visitedWeight = 0;
+  for (const idxStr of Object.keys(chapPageCache)) {
+    const idx = Number(idxStr);
+    visitedPages  += chapPageCache[idx];
+    visitedWeight += weights[idx] || 1;
+  }
+  return visitedWeight > 0 ? Math.max(1, Math.round((visitedPages / visitedWeight) * w)) : 20;
+}
+
+// Estimated book pages
+function estimateBookTotal() {
+  const len = _cxReader?.spine?.length || 1;
+  let total = 0;
+  for (let i = 0; i < len; i++) total += estimateChapPages(i);
+  return Math.max(1, total);
+}
+
+function estimateBookPage() {
+  let pages = 0;
+  for (let i = 0; i < currentSpineIndex; i++) pages += estimateChapPages(i);
+  return pages + currentChapPage;
+}
+
+function estimateBookPagesLeft() {
+  return Math.max(0, estimateBookTotal() - estimateBookPage());
+}
+
+// Lookup icon for a stat id
+const STAT_ICON = getStatusStats().reduce((acc, s) => { acc[s.id] = s.icon; return acc; }, {});
+
+// Compute the text value of a single stat (no icon — icon added by computeSlot)
+function computeStatValue(id) {
+  switch (id) {
+    case 'chapterPage':
+      return currentChapTotal > 0 ? currentChapPage + '/' + currentChapTotal : '';
+    case 'bookPage': {
+      const bp = estimateBookPage(), bt = estimateBookTotal();
+      return bp > 0 ? bp + '/' + bt : '';
+    }
+    case 'pagesLeftChap': {
+      if (currentChapTotal <= 0) return '';
+      // Single-page: count the current page itself, so the last page reads "1 left"
+      //   and earlier pages count down (page 1 of a 2-page chapter shows 2).
+      // Two-page: the left page is already read; count the visible right page and
+      //   beyond. A lone left-only last spread (endPage===0) still gets +1 to show 1.
+      const _bonus = currentIsTwoPage ? (currentEndPage === 0 ? 1 : 0) : 1;
+      return String(Math.max(1, currentChapTotal - currentChapPage + _bonus));
+    }
+    case 'pagesLeftBook': {
+      const _tpBonus = currentIsTwoPage && currentEndPage === 0 ? 1 : 0;
+      return String(Math.max(0, estimateBookPagesLeft() + _tpBonus));
+    }
+    case 'pctChapter':
+      return currentChapTotal > 0 ? Math.round((currentChapPage / currentChapTotal) * 100) + '%' : '';
+    case 'pctBook':
+      return Math.round(currentPct * 100) + '%';
+    case 'timeLeftChap': {
+      if (currentChapTotal <= 0) return formatEta(0);
+      // Mirror pagesLeftChap: single-page counts the current page, two-page counts
+      // from the left page (with the lone last-spread +1).
+      const _bonus = currentIsTwoPage ? (currentEndPage === 0 ? 1 : 0) : 1;
+      return formatEta(Math.max(1, currentChapTotal - currentChapPage + _bonus));
+    }
+    case 'timeLeftBook': {
+      const _tpBonus = currentIsTwoPage && currentEndPage === 0 ? 1 : 0;
+      return formatEta(Math.max(0, estimateBookPagesLeft() + _tpBonus));
+    }
+    case 'currentTime': {
+      const now = new Date();
+      if (prefs.statusBar?.clockFormat === '12h') {
+        return now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+      }
+      return now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+    case 'bookTitle':
+      return currentBook?.title || '';
+    case 'bookAuthor':
+      return currentBook?.author || '';
+    case 'chapterTitle':
+      return chapterLabelFromHref(currentHref);
+    case 'chapterNum': {
+      const spineTotal = _cxReader?.spine?.length || 0;
+      return spineTotal ? (currentSpineIndex + 1) + '/' + spineTotal : '';
+    }
+    case 'series': {
+      const sname = currentBook?.series_name || '';
+      if (!sname) return '';
+      const snum = currentBook?.series_number;
+      return snum ? sname + ' #' + snum : sname;
+    }
+    case 'battery': {
+      if (!_batteryMgr) return '';
+      return Math.round(_batteryMgr.level * 100) + '%';
+    }
+    case 'online':
+      return _isOnline ? t('reader.sb_online_yes') : t('reader.sb_offline_yes');
+    default:
+      return '';
+  }
+}
+
+// Build the text for one position slot (join multiple stats with ' | ', each with its icon)
+function computeSlot(ids) {
+  if (!ids?.length) return '';
+  return ids.map(id => {
+    const val      = computeStatValue(id);
+    if (!val) return '';
+    let iconSrc    = STAT_ICON[id];
+    if (id === 'battery' && _batteryMgr?.charging) iconSrc = '/images/battery_charging.svg';
+    const showIcon = prefs.statusBar.showIcons[id] !== false;   // default true
+    const prefix   = (iconSrc && showIcon) ? sbIconHtml(iconSrc) + '\u202F' : '';
+    return prefix + sbEsc(val);
+  }).filter(Boolean).join('  |  ');
+}
+
+// Update all overlay slots from current state. CXReader owns pagination state
+// (currentChapPage/EndPage/Total/currentIsTwoPage are set from the cx-relocated event),
+// so this just re-renders the slots from that already-correct state.
+function updateStatusBar() {
+  renderStatusSlots();
+}
+
+// Re-render only the slots that contain 'currentTime' (called by setInterval)
+function refreshStatusBarTime() {
+  const pos = prefs.statusBar.positions;
+  const pairs = [[sbTl, pos.tl], [sbTc, pos.tc], [sbTr, pos.tr],
+                 [sbBl, pos.bl], [sbBc, pos.bc], [sbBr, pos.br]];
+  pairs.forEach(([el, ids]) => {
+    if (ids.includes('currentTime')) el.innerHTML = computeSlot(ids);
+  });
+}
+setInterval(refreshStatusBarTime, 30000);
+
+function inNavZone(x) {
+  const w = window.innerWidth;
+  const leftPct  = prefs.navZoneLeftPct  ?? 20;
+  const rightPct = prefs.navZoneRightPct ?? 20;
+  if (leftPct  > 0 && x < w * leftPct  / 100) return 'prev';
+  if (rightPct > 0 && x > w - w * rightPct / 100) return 'next';
+  return null;
+}
+
+function applyNavZones() {
+  const root = document.documentElement;
+  root.style.setProperty('--nav-zone-left-pct',  (prefs.navZoneLeftPct  ?? 20) + '%');
+  root.style.setProperty('--nav-zone-right-pct', (prefs.navZoneRightPct ?? 20) + '%');
+}
+
+function getHeaderButtonBasePx() {
+  return window.matchMedia('(max-width: 640px)').matches ? 44 : 36;
+}
+
+function applyHeaderButtonSize() {
+  const root = document.documentElement;
+  const scale = prefs.headerButtonScalePct ?? 100;
+  const size  = Math.round(getHeaderButtonBasePx() * scale / 100);
+  root.style.setProperty('--reader-header-btn-size', size + 'px');
+  root.style.setProperty('--reader-header-icon-size', Math.max(14, Math.round(size * 0.53)) + 'px');
+  root.style.setProperty('--reader-header-min-height', (size + 8) + 'px');
+}
+
+// ── Floating nav button ───────────────────────────────────────────────────────
+function _positionFloatNavBtn() {
+  const btn = document.getElementById('float-nav-btn');
+  if (!btn) return;
+  const pos = prefs.floatNavBtnPos || { xPct: 0.88, yPct: 0.5 };
+  const W = window.innerWidth, H = window.innerHeight;
+  const bw = btn.offsetWidth || 52, bh = btn.offsetHeight || 52;
+  btn.style.left = Math.max(0, Math.min(W - bw, Math.round(pos.xPct * W - bw / 2))) + 'px';
+  btn.style.top  = Math.max(0, Math.min(H - bh, Math.round(pos.yPct * H - bh / 2))) + 'px';
+}
+
+function applyFloatNavBtn() {
+  const btn = document.getElementById('float-nav-btn');
+  if (!btn) return;
+  const show = !!prefs.floatNavBtn;
+  btn.style.display = show ? '' : 'none';
+  btn.style.opacity = ((prefs.floatNavBtnOpacity ?? 70) / 100).toFixed(2);
+  if (show) _positionFloatNavBtn();
+}
+
+function initFloatNavBtn() {
+  const btn = document.getElementById('float-nav-btn');
+  if (!btn) return;
+
+  let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+  let dragging = false, longPressTimer = null;
+  let capturedId = -1; // active pointer id; -1 = idle
+  const DRAG_TOUCH = 6, DRAG_MOUSE = 10, LONG_MS = 430;
+
+  function onStart(cx, cy, isTouch) {
+    const rect = btn.getBoundingClientRect();
+    startX = cx; startY = cy; startLeft = rect.left; startTop = rect.top;
+    dragging = false;
+    // Long-press = prev only on touch (unnatural with mouse)
+    if (isTouch) {
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null;
+        dragging = true; // suppress tap on release
+        goPrev();
+      }, LONG_MS);
+    }
+  }
+
+  function onMove(cx, cy, isTouch) {
+    const threshold = isTouch ? DRAG_TOUCH : DRAG_MOUSE;
+    if (Math.abs(cx - startX) > threshold || Math.abs(cy - startY) > threshold) {
+      clearTimeout(longPressTimer); longPressTimer = null; dragging = true;
+    }
+    if (!dragging) return;
+    const W = window.innerWidth, H = window.innerHeight;
+    const bw = btn.offsetWidth, bh = btn.offsetHeight;
+    btn.style.left = Math.max(0, Math.min(W - bw, startLeft + cx - startX)) + 'px';
+    btn.style.top  = Math.max(0, Math.min(H - bh, startTop  + cy - startY)) + 'px';
+  }
+
+  function onEnd() {
+    capturedId = -1;
+    const wasDrag = dragging;
+    clearTimeout(longPressTimer); longPressTimer = null; dragging = false;
+    if (wasDrag) {
+      const W = window.innerWidth, H = window.innerHeight;
+      const rect = btn.getBoundingClientRect();
+      prefs.floatNavBtnPos = {
+        xPct: (rect.left + rect.width  / 2) / W,
+        yPct: (rect.top  + rect.height / 2) / H,
+      };
+      persistPrefs();
+    } else {
+      goNext();
+    }
+  }
+
+  function onCancel() {
+    capturedId = -1;
+    clearTimeout(longPressTimer); longPressTimer = null; dragging = false;
+  }
+
+  // Use Pointer Events API — setPointerCapture keeps routing events to the
+  // element even when the pointer leaves the window, so the "glued to cursor"
+  // bug (caused by mouseup outside the window not being received) is impossible.
+  btn.addEventListener('pointerdown', (e) => {
+    if (e.button > 0) return;      // ignore right / middle click
+    if (capturedId !== -1) return;  // already tracking a pointer
+    e.preventDefault();
+    capturedId = e.pointerId;
+    btn.setPointerCapture(e.pointerId);
+    onStart(e.clientX, e.clientY, e.pointerType === 'touch');
+  });
+
+  btn.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== capturedId) return;
+    onMove(e.clientX, e.clientY, e.pointerType === 'touch');
+  });
+
+  btn.addEventListener('pointerup', (e) => {
+    if (e.pointerId !== capturedId) return;
+    onEnd();
+  });
+
+  btn.addEventListener('pointercancel', (e) => {
+    if (e.pointerId !== capturedId) return;
+    onCancel();
+  });
+
+  window.addEventListener('resize', _positionFloatNavBtn);
+}
+
+function applyHeaderBtnVisibility() {
+  const set = (id, visible) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = visible ? '' : 'none';
+  };
+  const hasAnnotations = annotationsCache.length > 0;
+  const isCbz = !!_cxReader?._isCbz;
+  set('btn-annotations',  !isCbz && (prefs.headerBtnAnnotations || hasAnnotations));
+  set('btn-search',       !isCbz && prefs.headerBtnSearch);
+  set('btn-jump-pct',     prefs.headerBtnPercentage);
+  set('btn-sync',         prefs.headerBtnSync);
+  set('btn-sleep-timer',  prefs.headerBtnSleepTimer);
+  set('btn-fullscreen',   prefs.headerBtnFullscreen);
+}
+
+// Apply CSS vars for edge inset (curved phone screens)
+function applyEdgePadding() {
+  const p = prefs.edgePadding;
+  const root = document.documentElement;
+  root.style.setProperty('--edge-pad-top',    p.top    + 'px');
+  root.style.setProperty('--edge-pad-right',  p.right  + 'px');
+  root.style.setProperty('--edge-pad-bottom', p.bottom + 'px');
+  root.style.setProperty('--edge-pad-left',   p.left   + 'px');
+  // For CXReader: re-measure how much the status bars overlap the viewer (their position
+  // shifts when edge-pad vars change), then re-apply the iframe inset and repaginate.
+  if (_cxReader) {
+    setTimeout(() => {
+      _cxMeasureViewerInset();
+      _cxReader.reapplyCss(buildEpubCss());
+    }, 30);
+  }
+}
+
+// Apply CSS variables for status bar font/size/style
+function resolveStatusBarFont(fontName) {
+  if (!fontName) return '';
+  const allFonts = [...SYSTEM_FONTS, ...customFonts];
+  const match = allFonts.find(f => f.value === fontName || f.label === fontName);
+  if (match) return match.value;
+  if (fontName.includes(',') || fontName.includes('"') || fontName.includes("'")) return fontName;
+  if (/\s/.test(fontName)) return `"${fontName}"`;
+  return fontName;
+}
+
+function applyStatusBarStyles() {
+  const sb   = prefs.statusBar;
+  const root = document.documentElement;
+  const inheritedFont = prefs.fontFamily || 'inherit';
+  const selectedFont = sb.font ? resolveStatusBarFont(sb.font) : inheritedFont;
+  const fontValue = selectedFont === 'inherit' ? 'inherit' : selectedFont;
+  root.style.setProperty('--sb-font', fontValue);
+  root.style.setProperty('--sb-font-size',   sb.fontSize + 'px');
+  root.style.setProperty('--sb-font-weight', sb.fontStyle.includes('bold')   ? 'bold'   : 'normal');
+  root.style.setProperty('--sb-font-style',  sb.fontStyle.includes('italic') ? 'italic' : 'normal');
+
+  // Separators
+  const thick = sb.separatorThickness + 'px';
+  if (sbSeparatorTop) {
+    sbSeparatorTop.style.display = sb.separatorTop    ? '' : 'none';
+    sbSeparatorTop.style.height  = thick;
+  }
+  if (sbSeparatorBottom) {
+    sbSeparatorBottom.style.display = sb.separatorBottom ? '' : 'none';
+    sbSeparatorBottom.style.height  = thick;
+  }
+
+  // Progress bars
+  applyProgressBarLayout();
+}
+
+function applyProgressBarLayout() {
+  const sb      = prefs.statusBar;
+  const chapCfg = sb.chapProgressBar;
+  const bookCfg = sb.bookProgressBar;
+
+  // When both bars are shown on the same edge, stack them so neither hides the other.
+  // Book bar sits flush at the edge; chapter bar is offset by book bar thickness.
+  const bothSame = chapCfg.show && bookCfg.show && chapCfg.position === bookCfg.position;
+
+  if (sbBookProg) {
+    sbBookProg.style.display = bookCfg.show ? '' : 'none';
+    sbBookProg.style.height  = bookCfg.thickness + 'px';
+    sbBookProg.style.top     = bookCfg.position === 'top'    ? 'var(--edge-pad-top, 0px)'    : 'auto';
+    sbBookProg.style.bottom  = bookCfg.position === 'bottom' ? 'calc(var(--sab, 0px) + var(--edge-pad-bottom, 0px))' : 'auto';
+  }
+
+  if (sbChapProg) {
+    sbChapProg.style.display = chapCfg.show ? '' : 'none';
+    sbChapProg.style.height  = chapCfg.thickness + 'px';
+    const edgeVar   = chapCfg.position === 'top' ? 'var(--edge-pad-top, 0px)' : 'calc(var(--sab, 0px) + var(--edge-pad-bottom, 0px))';
+    const chapOffset = bothSame
+      ? `calc(${edgeVar} + ${bookCfg.thickness + 1}px)`
+      : edgeVar;
+    sbChapProg.style.top     = chapCfg.position === 'top'    ? chapOffset : 'auto';
+    sbChapProg.style.bottom  = chapCfg.position === 'bottom' ? chapOffset : 'auto';
+  }
+
+  updateBookProgressBar();
+  updateChapProgressBar();
+}
+
+function updateChapProgressBar() {
+  if (!prefs.statusBar.chapProgressBar.show || !sbChapProgFill) return;
+  const pct = currentChapTotal > 0 ? (currentChapPage / currentChapTotal) * 100 : 0;
+  sbChapProgFill.style.width = pct + '%';
+}
+
+function updateBookProgressBar() {
+  if (!prefs.statusBar.bookProgressBar.show || !sbBookProgFill) return;
+  sbBookProgFill.style.width = (currentPct * 100) + '%';
+}
+
+// Build hairline chapter markers on the jump-to-% slider.
+// Called after TOC and/or locations are available; safe to call multiple times.
+function buildChapterMarkers() {
+  const container = document.getElementById('sb-chap-markers');
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Pick the depth with the most entries — this selects the "chapter" level rather than
+  // a handful of top-level parts or front-matter entries. Example: a book with 5 depth-0
+  // items (Cover, Half Title…) and 14 depth-1 items (Introduction, Chapter 1…) will
+  // correctly use depth 1 as the chapter granularity for markers.
+  const depthCounts = new Map();
+  tocFlatItems.forEach(t => depthCounts.set(t.depth, (depthCounts.get(t.depth) || 0) + 1));
+  let bestDepth = 0, bestCount = 0;
+  for (const [d, c] of depthCounts) { if (c > bestCount) { bestCount = c; bestDepth = d; } }
+  let topLevel = tocFlatItems.filter(t => t.depth === bestDepth);
+  if (topLevel.length < 2) topLevel = [...tocFlatItems];
+  if (topLevel.length < 2) return;
+
+  // CXReader spine for the marker index-ratio positions.
+  const cxSpine    = _cxReader?._book?.spine;
+  const spineTotal = cxSpine?.length || 1;
+
+  topLevel.forEach(({ href }, i) => {
+    if (i === 0) return; // first chapter starts at 0% — no marker needed
+    const hrefBase = (href || '').split('#')[0];
+    let pct = null;
+
+    // Spine-index ratio from the CXReader spine.
+    if (cxSpine?.length) {
+      const hrefLow  = hrefBase.toLowerCase();
+      const hrefFile = hrefLow.split('/').pop();
+      const idx = cxSpine.findIndex(s => {
+        // Prefer absPath (fully resolved) for matching; fall back to raw href
+        const sh = (s.absPath || s.href || '').split('#')[0].toLowerCase();
+        return sh === hrefLow || sh.split('/').pop() === hrefFile;
+      });
+      if (idx > 0) pct = idx / spineTotal;
+    }
+
+    if (pct == null || pct <= 0.001 || pct >= 0.999) return;
+    const marker = document.createElement('div');
+    marker.className = 'sb-chap-marker';
+    marker.style.left = (pct * 100).toFixed(2) + '%';
+    container.appendChild(marker);
+  });
+}
+
+// ── Auto-hide header ──────────────────────────────────────────────────────────
+
+// Timestamp of the last header-reveal so we can suppress accidental button clicks
+// that arrive during/just-after the slide-in animation (pointer-events go live
+// immediately when header-peek is added, before the 250ms transition completes).
+let _headerRevealTs = 0;
+const HEADER_REVEAL_GUARD_MS = 350; // must be ≥ the 250ms transition
+
+function syncHeaderDismissBackdrop() {
+  if (!headerDismissBackdrop) return;
+  const show = prefs.autoHideHeader
+    && readerLayout.classList.contains('header-peek')
+    && !isJumpPanelOpen()
+    && !tocSidebar.classList.contains('open');
+  headerDismissBackdrop.classList.toggle('visible', show);
+}
+
+let _sensorCooldown = false;
+function forceHideAutoHeader() {
+  if (!readerLayout.classList.contains('header-peek')) return;
+  isMouseOverHeader = false;
+  readerLayout.classList.remove('header-peek');
+  syncHeaderDismissBackdrop();
+  // Suppress the spurious mouseenter the sensor fires when the backdrop
+  // disappears and the browser "re-enters" the now-exposed sensor element.
+  _sensorCooldown = true;
+  setTimeout(() => { _sensorCooldown = false; }, 300);
+}
+
+function revealHeader() {
+  if (!readerLayout.classList.contains('header-peek')) {
+    _headerRevealTs = Date.now(); // record reveal time for click-guard
+  }
+  readerLayout.classList.add('header-peek');
+  syncHeaderDismissBackdrop();
+}
+
+function hideAutoHeader() {
+  if (!prefs.autoHideHeader) return;
+  if (!readerLayout.classList.contains('header-peek')) return;
+  if (tocSidebar.classList.contains('open') || isJumpPanelOpen()) return;
+  if (isMouseOverHeader) return;
+  forceHideAutoHeader();
+}
+
+function applyAutoHide() {
+  readerLayout.classList.toggle('autohide-header', prefs.autoHideHeader);
+  if (!prefs.autoHideHeader) {
+    forceHideAutoHeader();
+  }
+}
+
+// Show header when mouse enters the thin sensor zone at very top of page
+document.getElementById('header-sensor').addEventListener('mouseenter', () => {
+  if (!prefs.autoHideHeader || _sensorCooldown) return;
+  revealHeader();
+});
+document.getElementById('header-sensor').addEventListener('touchstart', () => {
+  if (!prefs.autoHideHeader) return;
+  revealHeader();
+}, { passive: true });
+// Prevent the synthetic click that follows touchend from hitting a header button
+document.getElementById('header-sensor').addEventListener('touchend', (e) => {
+  if (!prefs.autoHideHeader) return;
+  e.preventDefault();
+}, { passive: false });
+document.getElementById('header-sensor').addEventListener('click', () => {
+  if (!prefs.autoHideHeader) return;
+  if (readerLayout.classList.contains('header-peek')) {
+    forceHideAutoHeader();
+  } else {
+    revealHeader();
+  }
+});
+
+// Capture-phase guard: swallow any click that lands on the header within
+// HEADER_REVEAL_GUARD_MS of a reveal, so the tap-to-show gesture never
+// accidentally activates a button underneath the user's finger.
+document.querySelector('.reader-header').addEventListener('click', (e) => {
+  if (prefs.autoHideHeader && Date.now() - _headerRevealTs < HEADER_REVEAL_GUARD_MS) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }
+}, true); // capture:true — runs before individual button handlers
+// Track whether the mouse is currently inside the header bar
+let isMouseOverHeader = false;
+document.querySelector('.reader-header').addEventListener('mouseenter', () => { isMouseOverHeader = true; });
+// Hide header as soon as mouse leaves the header bar itself
+document.querySelector('.reader-header').addEventListener('mouseleave', () => {
+  isMouseOverHeader = false;
+  hideAutoHeader();
+});
+function onHeaderDismissBackdrop(e) {
+  if (!prefs.autoHideHeader || !readerLayout.classList.contains('header-peek')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  forceHideAutoHeader();
+}
+headerDismissBackdrop?.addEventListener('pointerdown', onHeaderDismissBackdrop);
+headerDismissBackdrop?.addEventListener('touchstart', onHeaderDismissBackdrop, { passive: false });
+headerDismissBackdrop?.addEventListener('click', onHeaderDismissBackdrop);
+
+// ── TOC ───────────────────────────────────────────────────────────────────────
+function buildTocRecursive(toc, depth, fragment) {
+  toc.forEach(item => {
+    const btn = document.createElement('button');
+    btn.className   = `toc-item toc-depth-${depth}`;
+    btn.textContent = item.label;
+    btn.title       = item.label;
+
+    btn.addEventListener('click', () => {
+      closePanels();
+      // Delay so panel animation finishes and viewer has correct dimensions
+      setTimeout(async () => {
+        const [hrefBase, anchor] = (item.href || '').split('#');
+        // Resolve via spine — findSpineItemForHref handles path-prefix mismatches
+        const spineItem = findSpineItemForHref(hrefBase);
+        // For chapter-level entries (depth <= 1), use spineItem.href without anchor so
+        // epub.js navigates to the start of the chapter file. display(spineIndex) would
+        // restore the last-cached position (which can be mid-chapter from a previous visit),
+        // while display(href) without a fragment always goes to the beginning.
+        // Sub-section entries (depth > 1) keep their anchors for precise positioning.
+        const displayTarget = spineItem?.index != null
+          ? (anchor && depth > 1 ? `${spineItem.href}#${anchor}` : spineItem.href)
+          : item.href;
+        log(`[nav] TOC | depth=${depth} anchor="${anchor||''}" target=${JSON.stringify(displayTarget)}`);
+        if (_cxReader) await _cxReader.goToHref(displayTarget || item.href);
+      }, 80);
+    });
+
+    fragment.appendChild(btn);
+    tocFlatItems.push({ label: item.label, href: item.href, depth, button: btn });
+    const sub = item.subitems ?? item.children;
+    if (sub?.length) buildTocRecursive(sub, depth + 1, fragment);
+  });
+}
+
+function buildToc(toc) {
+  tocFlatItems = [];
+  tocListEl.classList.add('is-building');
+  tocListEl.innerHTML = '';
+
+  const fragment = document.createDocumentFragment();
+  buildTocRecursive(toc, 0, fragment);
+  tocListEl.appendChild(fragment);
+
+  // Reveal only after full list is in DOM to avoid visible style churn.
+  requestAnimationFrame(() => {
+    tocListEl.classList.remove('is-building');
+  });
+}
+
+function updateActiveTocItem(href) {
+  if (!href) return;
+  // Strip _split_NNN suffix — epub.js splits large chapters but TOC only lists _split_000
+  const norm  = h => (h || '').split('#')[0].replace(/_split_\d+(\.\w+)$/, '$1').toLowerCase();
+  const base  = norm(href).split('/').pop();
+  let anyActive = false;
+  tocFlatItems.forEach(({ href: ih, button }) => {
+    const ib     = norm(ih || '').split('/').pop();
+    const active = !!(base && ib && (base === ib || base.includes(ib) || ib.includes(base)));
+    button.classList.toggle('active', active);
+    if (active) anyActive = true;
+  });
+  if (!anyActive) {
+    // CXReader range fallback: activate the last TOC entry whose spine index ≤ currentSpineIndex
+    if (_cxReader) {
+      const rangeItem = _cxRangeActiveToc();
+      if (rangeItem) {
+        tocFlatItems.forEach(({ href: ih, button }) => {
+          button.classList.toggle('active', ih === rangeItem.href);
+        });
+        return;
+      }
+    }
+    warn('[toc-debug] NO MATCH for spine href:', href,
+      '| base:', base,
+      '\nTOC hrefs:', tocFlatItems.map(t => t.href).join(' | '));
+  }
+}
+
+function chapterLabelFromHref(href) {
+  if (!href || !tocFlatItems.length) return '';
+  // Normalize: decode URI, strip anchor/query, collapse backslash, lowercase,
+  // and strip _split_NNN suffix so split-chapter spine files match TOC entries.
+  const norm = (h) => decodeURIComponent(h || '')
+    .split('#')[0].split('?')[0]
+    .replace(/\\/g, '/')
+    .replace(/_split_\d+(\.\w+)$/, '$1')
+    .toLowerCase()
+    .replace(/^\//, '');
+  const n = norm(href);
+  // 1. Exact full-path match
+  let match = tocFlatItems.find(({ href: ih }) => norm(ih) === n);
+  if (match) return match.label;
+  // 2. One path is a suffix of the other (different leading directories)
+  match = tocFlatItems.find(({ href: ih }) => {
+    const t = norm(ih);
+    return (n.endsWith('/' + t) || t.endsWith('/' + n));
+  });
+  if (match) return match.label;
+  // 3. Filename-only exact match (same file, different directory structure)
+  const base = n.split('/').pop();
+  match = tocFlatItems.find(({ href: ih }) => base && norm(ih).split('/').pop() === base);
+  if (match) return match.label;
+  // 4. CXReader range-based: last TOC entry whose spine index ≤ currentSpineIndex.
+  //    Handles EPUBs where TOC only marks chapter starts and many spine items have no entry.
+  if (_cxReader) {
+    const rangeMatch = _cxRangeActiveToc();
+    if (rangeMatch) return rangeMatch.label;
+  }
+  return '';
+}
+
+function tocHrefNorm(h) {
+  return decodeURIComponent(h || '')
+    .split('#')[0].split('?')[0]
+    .replace(/\\/g, '/')
+    .replace(/_split_\d+(\.\w+)$/, '$1')
+    .toLowerCase()
+    .replace(/^\//, '');
+}
+
+// CXReader: resolve a TOC href to a 0-based spine index using the live CXReader spine list.
+function _cxTocToSpineIdx(tocHref) {
+  if (!_cxReader) return -1;
+  const norm = h => decodeURIComponent(h || '').split('#')[0].toLowerCase();
+  const tBase = norm(tocHref).split('/').pop();
+  const spine = _cxReader.spine;
+  for (let i = 0; i < spine.length; i++) {
+    const sh = norm(spine[i].href);
+    if (sh === norm(tocHref) || sh.split('/').pop() === tBase) return i;
+  }
+  return -1;
+}
+
+// CXReader: find the TOC item that "owns" the current spine position (range-based: last TOC
+// entry whose spine index is ≤ currentSpineIndex). Handles EPUBs where TOC only lists major
+// chapter starts and many spine items have no direct TOC entry.
+function _cxRangeActiveToc() {
+  if (!_cxReader || !tocFlatItems.length) return null;
+  let best = null;
+  let bestIdx = -1;
+  for (const item of tocFlatItems) {
+    const si = _cxTocToSpineIdx(item.href);
+    if (si >= 0 && si <= currentSpineIndex && si > bestIdx) {
+      bestIdx = si;
+      best = item;
+    }
+  }
+  return best;
+}
+
+function findCurrentTopLevelChapIdx() {
+  const tops = tocFlatItems.filter(t => t.depth === 0);
+  if (!tops.length) return { tops, idx: -1 };
+
+  const href = currentHref || '';
+  if (!href) return { tops, idx: -1 };
+
+  const n = tocHrefNorm(href);
+  const base = n.split('/').pop();
+  let matchFlatIdx = -1;
+  tocFlatItems.forEach((t, i) => {
+    const tn = tocHrefNorm(t.href);
+    const tb = tn.split('/').pop();
+    const matches = !!(base && tb && (base === tb || base.includes(tb) || tb.includes(base)))
+      || tn === n
+      || (n.endsWith('/' + tn) || tn.endsWith('/' + n));
+    if (matches) matchFlatIdx = i;
+  });
+
+  if (matchFlatIdx >= 0) {
+    for (let i = matchFlatIdx; i >= 0; i--) {
+      if (tocFlatItems[i].depth === 0) {
+        return { tops, idx: tops.indexOf(tocFlatItems[i]) };
+      }
+    }
+  }
+
+  const curSpine = currentSpineIndex;
+  if (curSpine != null && curSpine >= 0) {
+    let bestIdx = -1;
+    tops.forEach((t, ti) => {
+      const spineItem = findSpineItemForHref((t.href || '').split('#')[0]);
+      if (spineItem?.index != null && spineItem.index <= curSpine) bestIdx = ti;
+    });
+    return { tops, idx: bestIdx };
+  }
+
+  return { tops, idx: -1 };
+}
+
+async function navigateToTocChapter(target) {
+  if (!target?.href) return;
+  if (_cxReader) await _cxReader.goToHref(target.href);
+}
+
+// ── Panels ────────────────────────────────────────────────────────────────────
+function openToc() {
+  const centerActiveTocItem = () => {
+    const active = tocListEl.querySelector('.toc-item.active');
+    if (!active) return false;
+    const itemTop = active.offsetTop;
+    const itemHeight = active.offsetHeight;
+    const listHeight = tocListEl.clientHeight;
+    tocListEl.scrollTop = itemTop - (listHeight / 2) + (itemHeight / 2);
+    return true;
+  };
+
+  // Pre-position the list before the sidebar becomes visible to avoid a visible jump.
+  centerActiveTocItem();
+
+  tocSidebar.classList.add('open');
+  settingsPanel.classList.remove('open');
+  panelBackdrop.classList.add('visible');
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  // Fallback recenter after slide-in in case TOC updates while opening.
+  setTimeout(() => {
+    centerActiveTocItem();
+  }, 280);
+}
+function activateSettingsTab(tab) {
+  const bar = settingsPanel.querySelector('.settings-tabs-bar');
+  if (!bar) return;
+  bar.querySelectorAll('.settings-tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+  settingsPanel.querySelectorAll('.settings-tab-pane').forEach(pane => {
+    pane.classList.toggle('active', pane.dataset.tab === tab);
+  });
+  try { localStorage.setItem('settingsTab', tab); } catch {}
+}
+function openSettings() {
+  settingsPanel.classList.add('open');
+  tocSidebar.classList.remove('open');
+  bookmarksSidebar.classList.remove('open');
+  panelBackdrop.classList.add('visible');
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  activateSettingsTab(localStorage.getItem('settingsTab') || 'theme');
+  renderDictSettings();
+}
+function openBookmarks() {
+  bookmarksSidebar.classList.add('open');
+  tocSidebar.classList.remove('open');
+  settingsPanel.classList.remove('open');
+  panelBackdrop.classList.add('visible');
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+}
+function isJumpPanelOpen() {
+  return jumpPctPanel && jumpPctPanel.style.display !== 'none';
+}
+
+function openJumpPanel() {
+  if (!jumpPctPanel) return;
+  const pct = String(Math.round(currentPct * 100));
+  jumpPctSlider.value = pct;
+  jumpPctValue.value = pct;
+  jumpPctPanel.style.display = '';
+  jumpPctBackdrop?.classList.add('visible');
+  jumpPctBackdrop?.removeAttribute('hidden');
+  if (prefs.autoHideHeader) {
+    readerLayout.classList.add('header-peek');
+    syncHeaderDismissBackdrop();
+  }
+}
+
+function closeJumpPanel() {
+  if (!jumpPctPanel) return;
+  jumpPctPanel.style.display = 'none';
+  jumpPctBackdrop?.classList.remove('visible');
+  jumpPctBackdrop?.setAttribute('hidden', '');
+  jumpPctValue?.blur();
+  // Re-evaluate auto-hide: hide header unless something else is keeping it open
+  if (prefs.autoHideHeader && !tocSidebar.classList.contains('open') && !bookmarksSidebar.classList.contains('open') && !isMouseOverHeader) {
+    forceHideAutoHeader();
+  } else {
+    syncHeaderDismissBackdrop();
+  }
+}
+function closePanels() {
+  closeFontPicker();
+  const activeEl = document.activeElement;
+  const searchHadFocus = !!activeEl && searchSidebar.contains(activeEl);
+  tocSidebar.classList.remove('open');
+  settingsPanel.classList.remove('open');
+  searchSidebar.classList.remove('open');
+  bookmarksSidebar.classList.remove('open');
+  document.getElementById('annotations-sidebar')?.classList.remove('open');
+  panelBackdrop.classList.remove('visible');
+  closeJumpPanel();
+  if (searchHadFocus && typeof activeEl.blur === 'function') activeEl.blur();
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+}
+
+function hasOpenPanel() {
+  return tocSidebar.classList.contains('open')
+    || searchSidebar.classList.contains('open')
+    || settingsPanel.classList.contains('open')
+    || bookmarksSidebar.classList.contains('open')
+    || document.getElementById('annotations-sidebar')?.classList.contains('open');
+}
+
+async function returnToLibrary() {
+  // Show closing overlay immediately so the user sees feedback during async save
+  loadingMsg.textContent = t('reader.closing');
+  loadingOverlay.classList.remove('hidden');
+
+  clearInterruptedSession();
+  cancelDebouncedSync();
+  stopPeriodicSync();
+  if (!prefs.skipSaveOnClose) {
+    // forceLocal only when the user actually navigated away from the opening position.
+    // An open-then-immediate-close (no pages turned) should not force-save the imprecise
+    // CFI-display starting page over the server's correct stored value.
+    await saveProgress({ forceLocal: currentCfi !== openCfi });
+  }
+  await endStatsSession();
+  isReady = false;          // block beforeunload from double-saving
+  if (isAndroidApp() && window.AndroidCodexa?.setReaderMode) {
+    window.AndroidCodexa.setReaderMode(false);
+  }
+  // Unlock orientation when leaving reader
+  if (prefs.lockPortrait) void applyPortraitLock(false);
+  if (window.parent) {
+    window.parent.postMessage({ type: 'cx-close' }, '*');
+  } else {
+    window.location.href = libraryReturnUrl;
+  }
+}
+
+function isFullscreenActive() {
+  return !!document.fullscreenElement;
+}
+
+function isFullscreenSupported() {
+  return !!document.fullscreenEnabled
+    && typeof document.documentElement.requestFullscreen === 'function';
+}
+
+function syncFullscreenButton() {
+  if (!fullscreenBtn) return;
+  if (!isFullscreenSupported()) {
+    fullscreenBtn.classList.add('hidden');
+    return;
+  }
+  fullscreenBtn.classList.remove('hidden');
+  const img = fullscreenBtn.querySelector('img.nav-icon-fullscreen');
+  if (img) {
+    img.src = isFullscreenActive() ? '/images/fullscreen_exit.svg' : '/images/fullscreen.svg';
+  }
+  fullscreenBtn.title = isFullscreenActive() ? t('reader.btn_fullscreen_exit') : t('reader.btn_fullscreen');
+}
+
+async function toggleFullscreen() {
+  if (!isFullscreenSupported()) return;
+  try {
+    if (isFullscreenActive()) {
+      await document.exitFullscreen();
+    } else {
+      await document.documentElement.requestFullscreen();
+    }
+  } catch {
+    toast.error(t('reader.err_no_fullscreen'));
+  }
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+function openSearch() {
+  searchSidebar.classList.add('open');
+  tocSidebar.classList.remove('open');
+  settingsPanel.classList.remove('open');
+  panelBackdrop.classList.add('visible');
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  setTimeout(() => searchInput.focus(), 280);
+}
+
+function clearSearchHighlights() {
+  searchNav = null;
+  // Clear search marks from the CXReader iframe
+  const cxDoc = _cxReader?._renderer?.iframe?.contentDocument;
+  if (cxDoc) {
+    cxDoc.querySelectorAll('mark.br-hl').forEach(m => m.replaceWith(cxDoc.createTextNode(m.textContent)));
+  }
+}
+
+function highlightExcerpt(excerpt, query) {
+  const e = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const escaped = e(excerpt);
+  const re = new RegExp(e(query).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi');
+  return escaped.replace(re, m => `<mark>${m}</mark>`);
+}
+
+// Extract the start-point of a range CFI for reliable navigation.
+// Range format: epubcfi(base,startOffset,endOffset)
+// Location format: epubcfi(base+startOffset)
+function cfiRangeToStart(cfi) {
+  // Matches: epubcfi( anything , /something , /something )
+  const m = String(cfi).match(/^epubcfi\((.+),(\/.+),(\/.+)\)$/);
+  if (!m) return cfi; // not a range — already a location CFI
+  return `epubcfi(${m[1]}${m[2]})`;
+}
+
+// Walk body text nodes to find the one that contains character offset `targetOffset`.
+// Returns { node, innerOffset } or null. Uses the body's ownerDocument so it works inside
+// iframes. All text nodes are walked (no script/style exclusion) to match body.textContent
+// offsets used during search — the link-interceptor script is always appended last, so any
+// offset found in the original book text maps correctly.
+function _cxFindNodeAtOffset(body, targetOffset) {
+  const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
+  let pos = 0;
+  let node;
+  while ((node = walker.nextNode())) {
+    const len = node.textContent.length;
+    if (pos + len > targetOffset) return { node, innerOffset: targetOffset - pos };
+    pos += len;
+  }
+  return null;
+}
+
+// Highlight all occurrences of query in the CXReader iframe by wrapping matched text nodes in
+// <mark class="br-hl">. Works perfectly without bionic reading; with bionic ON some matches may
+// miss (text nodes are split by word).
+function _cxApplySearchHighlight(body, query) {
+  if (!body || !query) return;
+  const doc   = body.ownerDocument;
+  const reEsc = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re    = new RegExp(`(${reEsc})`, 'gi');
+  // Remove any stale marks first
+  doc.querySelectorAll('mark.br-hl').forEach(m => m.replaceWith(doc.createTextNode(m.textContent)));
+  // Walk text nodes (skip script/style) and wrap matches
+  const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => n.parentElement?.closest('script,style') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+  });
+  const hits = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    if (re.test(node.textContent)) { hits.push(node); re.lastIndex = 0; }
+  }
+  hits.forEach(textNode => {
+    if (!textNode.parentNode) return;
+    const parts = textNode.textContent.split(re);
+    if (parts.length <= 1) return;
+    const frag = doc.createDocumentFragment();
+    parts.forEach((part, pi) => {
+      if (pi % 2 === 0) {
+        if (part) frag.appendChild(doc.createTextNode(part));
+      } else {
+        const mark = doc.createElement('mark');
+        mark.className = 'br-hl';
+        mark.textContent = part;
+        frag.appendChild(mark);
+      }
+    });
+    textNode.replaceWith(frag);
+  });
+}
+
+async function jumpToSearchResultCX(spineIdx, textOffset, query) {
+  if (!_cxReader) return;
+  if (!preSearchCfi && currentCfi) {
+    preSearchCfi = currentCfi;
+    searchBackBtn.style.display   = '';
+    searchAcceptBtn.style.display = '';
+  }
+  closePanels();
+  clearSearchHighlights();
+  await _cxReader.goToSpineItem(spineIdx);
+  // After render the paginator is at spread 0 (body.style.transform === ''), so client rects
+  // are in natural body-x coordinates — exactly what goToRange needs.
+  const body = _cxReader._renderer?.iframe?.contentDocument?.body;
+  if (!body) return;
+  const hit = _cxFindNodeAtOffset(body, textOffset);
+  if (!hit) return;
+  const doc = body.ownerDocument;
+  const range = doc.createRange();
+  const maxOff = hit.node.textContent.length;
+  range.setStart(hit.node, Math.min(hit.innerOffset, maxOff));
+  range.setEnd(hit.node, Math.min(hit.innerOffset + 1, maxOff));
+  _cxReader.scrollToRange(range);
+  // Apply highlight marks after scrolling — marks are inline so they won't affect column layout
+  _cxApplySearchHighlight(body, query);
+}
+
+async function runSearchCX(query) {
+  if (!_cxReader) { searchStatusEl.textContent = ''; return; }
+  const spine = _cxReader.spine;
+  const lowerQuery = query.toLowerCase();
+  let total = 0;
+  for (let i = 0; i < spine.length; i++) {
+    if (searchAbort.aborted) return;
+    const item = spine[i];
+    searchStatusEl.textContent = t('reader.search_progress', { n: i + 1, total: spine.length });
+    try {
+      const html = await fetch(item.blobUrl).then(r => r.text());
+      if (searchAbort.aborted) return;
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const text = doc.body?.textContent || '';
+      const lowerText = text.toLowerCase();
+      let pos = 0;
+      while (pos < lowerText.length && total < 200) {
+        const idx = lowerText.indexOf(lowerQuery, pos);
+        if (idx < 0) break;
+        const start = Math.max(0, idx - 60);
+        const end   = Math.min(text.length, idx + query.length + 60);
+        const excerpt = (start > 0 ? '…' : '') + text.slice(start, end).trim() + (end < text.length ? '…' : '');
+        total++;
+        const chapterLabel = chapterLabelFromHref(item.href) || item.href.split('/').pop();
+        const capturedSpineIdx = i;
+        const capturedOffset   = idx;
+        const div = document.createElement('div');
+        div.className = 'search-result';
+        div.innerHTML = `<div class="search-result-chapter">${esc(chapterLabel)}</div>` +
+                        `<div class="search-result-excerpt">${highlightExcerpt(excerpt, query)}</div>`;
+        div.addEventListener('click', () => void jumpToSearchResultCX(capturedSpineIdx, capturedOffset, query));
+        searchResultsEl.appendChild(div);
+        pos = idx + query.length;
+      }
+    } catch { /* spine item unreadable — skip */ }
+  }
+  if (searchAbort.aborted) return;
+  if (total === 0) {
+    searchStatusEl.textContent = t('reader.search_none');
+  } else {
+    const n = total >= 200 ? total + '+' : total;
+    searchStatusEl.textContent = total === 1 ? t('reader.search_count_1') : total < 5 ? t('reader.search_count_2_4', { n }) : t('reader.search_count', { n });
+  }
+}
+
+async function runSearch(query) {
+  searchResultsEl.innerHTML = '';
+  searchStatusEl.textContent = t('reader.search_running');
+
+  const abort = { aborted: false };
+  searchAbort.aborted = true;   // abort any previous search
+  searchAbort = abort;
+
+  if (_cxReader) await runSearchCX(query);
+}
+
+// ── Dictionary ────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function loadAvailableDicts() {
+  if (availableDicts !== null) return availableDicts;
+  try { availableDicts = await apiFetch('/dictionary'); }
+  catch { availableDicts = []; }
+  return availableDicts;
+}
+
+/** Returns true if there is at least one usable dictionary given current prefs.
+ *  Semantics for prefs.dictionaries:
+ *    []   (empty array) — never configured; use all available dicts
+ *    null               — user explicitly disabled all dicts
+ *    [...ids]           — use only these IDs, in this order
+ */
+function hasDictsEnabled() {
+  if (availableDicts === null) return true;  // not loaded yet — show optimistically
+  if (availableDicts.length === 0) return false; // no dicts installed
+  if (prefs.dictionaries === null) return false; // user explicitly disabled all
+  if (!Array.isArray(prefs.dictionaries) || prefs.dictionaries.length === 0) return true; // use all
+  return prefs.dictionaries.some(id => availableDicts.some(d => d.id === id));
+}
+
+function updateDictButtonVisibility() {
+  document.getElementById('annot-btn-dict')?.classList.toggle('hidden', !hasDictsEnabled());
+}
+
+async function renderDictSettings() {
+  const container = document.getElementById('dict-settings-list');
+  if (!container) return;
+  // Fetch dicts and server prefs in parallel. Server prefs may have dictionaryMeta
+  // updated from the Settings page (which doesn't write to localStorage). If localStorage
+  // was cleared, dictionaries/dictionaryOrder are also restored here from the server copy.
+  const [dicts] = await Promise.all([
+    loadAvailableDicts(),
+    apiFetch('/settings').then(s => {
+      const sp = typeof s.reader_prefs === 'string' ? JSON.parse(s.reader_prefs) : (s.reader_prefs || {});
+      if (sp.dictionaryMeta) prefs.dictionaryMeta = sp.dictionaryMeta;
+      // dictionaryOrder (just display order, not language-specific) always syncs from server —
+      // same as other global-ish prefs.
+      if (sp.dictionaryOrder?.length) prefs.dictionaryOrder = sp.dictionaryOrder;
+      // dictionaries (the ENABLED set), by contrast, is only restored from the server on a
+      // genuinely fresh browser (no br_reader_prefs at all — matches the same gate used for this
+      // exact purpose in init()). It being [] is now the NORMAL per-book "unconfigured, use the
+      // book-language default" state (see loadBookPrefs()) for any book without its own
+      // override — that must NOT be treated as "fresh install", or every unconfigured book would
+      // silently inherit whatever dictionaries were last explicitly saved server-side for a
+      // completely different book — the same bug loadBookPrefs() fixes for localStorage.
+      if (!localStorage.getItem('br_reader_prefs') && sp.dictionaries !== undefined) {
+        prefs.dictionaries = sp.dictionaries;
+      }
+    }).catch(() => {}),
+  ]);
+  if (!dicts.length) {
+    container.innerHTML = '<div style="font-size:.82rem;color:var(--color-text-muted)">' +
+      t('reader.dict_no_dicts') + '</div>';
+    return;
+  }
+
+  // Build ordered list: saved order first, then any new dicts appended at end.
+  // dictionaryOrder = all dict IDs in user's preferred display order (including disabled)
+  // dictionaries    = enabled IDs only (null = all disabled; [] = all enabled/default)
+  const savedList   = Array.isArray(prefs.dictionaries) && prefs.dictionaries.length ? prefs.dictionaries : [];
+  const savedOrder  = Array.isArray(prefs.dictionaryOrder) && prefs.dictionaryOrder.length ? prefs.dictionaryOrder : savedList;
+  const allIds      = dicts.map(d => d.id);
+  const ordered     = [...savedOrder.filter(id => allIds.includes(id)), ...allIds.filter(id => !savedOrder.includes(id))];
+  // Default (never-configured) state: match showDictPopup's own default-state logic below —
+  // enable dictionaries whose "from" language matches the book's, falling back to all if the
+  // book's language is unknown or nothing is tagged for it. Without this, a book in any
+  // non-English language would show every installed dictionary checked regardless of relevance.
+  const rawLang  = (_cxReader && _cxReader._book?.metadata?.language) || currentBook?.language;
+  const bookLang = normalizeBookLang(rawLang);
+  const defaultIds = bookLang
+    ? (dicts.filter(d => (prefs.dictionaryMeta?.[d.id]?.lang_from ?? d.lang_from) === bookLang).map(d => d.id))
+    : [];
+  const defaultEnabledIds = defaultIds.length ? defaultIds : allIds;
+  // enabled set: null = none; [] = default (book-language match, or all); [...] = explicit list
+  const enabled = new Set(prefs.dictionaries === null ? [] : savedList.length ? savedList : defaultEnabledIds);
+
+  function saveOrder() {
+    const items = container.querySelectorAll('.dict-settings-item');
+    const allOrdered = Array.from(items).map(el => el.querySelector('input[type="checkbox"]').value);
+    const enabledIds = Array.from(items)
+      .filter(el => el.querySelector('input[type="checkbox"]').checked)
+      .map(el => el.querySelector('input[type="checkbox"]').value);
+    prefs.dictionaryOrder = allOrdered;
+    // null = explicitly disabled all; non-empty array = explicit enabled list
+    prefs.dictionaries = enabledIds.length === 0 ? null : enabledIds;
+    persistPrefs();
+    updateDictButtonVisibility();
+  }
+
+  function buildRow(id) {
+    const d   = dicts.find(x => x.id === id);
+    if (!d) return null;
+    const row = document.createElement('div');
+    row.className   = 'dict-settings-item';
+    row.dataset.id  = id;
+    const _lf = prefs.dictionaryMeta?.[id]?.lang_from ?? d.lang_from;
+    const _lt = prefs.dictionaryMeta?.[id]?.lang_to   ?? d.lang_to;
+    const _langTag = (_lf || _lt)
+      ? `<span class="dict-lang-tag">(${[_lf, _lt].filter(Boolean).join('-')})</span>`
+      : '';
+    row.innerHTML = `
+      <input type="checkbox" value="${esc(id)}" ${enabled.has(id) ? 'checked' : ''}>
+      <div class="dict-settings-name" style="flex:1">
+        <span>${esc(d.name)}</span>${_langTag}
+        ${d.wordcount ? `<span class="dict-settings-count">${d.wordcount.toLocaleString()} ${t('reader.dict_words')}</span>` : ''}
+      </div>
+      <div class="dict-order-btns">
+        <button class="dict-order-btn" data-dir="up"   title="${t('reader.dict_move_up')}"   aria-label="${t('reader.dict_move_up')}">&#8593;</button>
+        <button class="dict-order-btn" data-dir="down" title="${t('reader.dict_move_down')}" aria-label="${t('reader.dict_move_down')}">&#8595;</button>
+      </div>`;
+    row.querySelector('input[type="checkbox"]').addEventListener('change', saveOrder);
+    row.querySelectorAll('.dict-order-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const dir  = btn.dataset.dir;
+        const rows = Array.from(container.children);
+        const idx  = rows.indexOf(row);
+        if (dir === 'up'   && idx > 0)             container.insertBefore(row, rows[idx - 1]);
+        if (dir === 'down' && idx < rows.length - 1) container.insertBefore(rows[idx + 1], row);
+        // Re-evaluate button state after move
+        updateOrderBtnState();
+        saveOrder();
+      });
+    });
+    return row;
+  }
+
+  function updateOrderBtnState() {
+    const rows = Array.from(container.children);
+    rows.forEach((row, i) => {
+      row.querySelector('[data-dir="up"]').disabled   = (i === 0);
+      row.querySelector('[data-dir="down"]').disabled = (i === rows.length - 1);
+    });
+  }
+
+  container.innerHTML = '';
+  ordered.forEach(id => {
+    const row = buildRow(id);
+    if (row) container.appendChild(row);
+  });
+  updateOrderBtnState();
+}
+
+async function showDictPopup(word) {
+  if (!word) return;
+  if (!hasDictsEnabled()) return;
+  const popup     = document.getElementById('dict-popup');
+  const backdrop  = document.getElementById('dict-backdrop');
+  const wordEl    = document.getElementById('dict-popup-word');
+  const resultsEl = document.getElementById('dict-popup-results');
+
+  // Intercept <a> clicks inside definitions — look up that word instead of navigating
+  if (!resultsEl._dictLinksAttached) {
+    resultsEl._dictLinksAttached = true;
+    resultsEl.addEventListener('click', (e) => {
+      const a = e.target.closest('a');
+      if (!a) return;
+      e.preventDefault();
+      // Prefer link text over href (href is often an internal dict reference, not a word)
+      const target = a.textContent.trim().replace(/^[^a-zA-Z\u00C0-\u017E]+|[^a-zA-Z\u00C0-\u017E]+$/g, '').trim();
+      if (target) showDictPopup(target);
+    });
+  }
+
+  wordEl.textContent = word;
+  resultsEl.innerHTML = `<div class="dict-loading">${t('reader.dict_loading')}</div>`;
+  backdrop.classList.add('open');
+  popup.classList.add('open');
+  popup.setAttribute('aria-hidden', 'false');
+
+  const dicts   = await loadAvailableDicts();
+  // null = explicitly disabled; [] = default (never configured); [...] = explicit list
+  let enabled;
+  if (prefs.dictionaries === null) {
+    enabled = [];
+  } else if (Array.isArray(prefs.dictionaries) && prefs.dictionaries.length) {
+    // User has an explicit selection — respect it, no language filter
+    enabled = prefs.dictionaries;
+  } else {
+    // Default state: apply language filter based on book's source language.
+    // CXReader parses dc:language directly from the EPUB; use it as the primary source since
+    // the server-side currentBook.language can be empty for books not yet indexed.
+    const rawLang = (_cxReader && _cxReader._book?.metadata?.language) || currentBook?.language;
+    const bookLang = normalizeBookLang(rawLang);
+    const allIds   = dicts.map(d => d.id);
+    if (bookLang) {
+      const matched = dicts
+        .filter(d => (prefs.dictionaryMeta?.[d.id]?.lang_from ?? d.lang_from) === bookLang)
+        .map(d => d.id);
+      enabled = matched.length ? matched : allIds; // fallback to all if no tagged match
+    } else {
+      enabled = allIds; // unknown book language — use all
+    }
+    // Sort enabled list by the user's preferred dictionary order
+    if (prefs.dictionaryOrder?.length) {
+      const orderMap = new Map(prefs.dictionaryOrder.map((id, i) => [id, i]));
+      enabled = [...enabled].sort((a, b) => (orderMap.get(a) ?? 9999) - (orderMap.get(b) ?? 9999));
+    }
+  }
+
+  if (!enabled.length) {
+    resultsEl.innerHTML = '<div class="dict-empty">' + t('reader.dict_no_dicts_short') + '</div>';
+    return;
+  }
+
+  try {
+    const data = await apiFetch(`/dictionary/lookup?word=${encodeURIComponent(word)}&dicts=${enabled.join(',')}`);
+    if (!data.results.length) {
+      resultsEl.innerHTML = `<div class="dict-empty">${t('reader.dict_not_found', { word: esc(word) })}</div>`;
+    } else {
+      resultsEl.innerHTML = data.results.map((r, i) => {
+        // HTML type: render as HTML but strip any <script>/<style> for safety.
+        // Plain text type (m/g/others): escape and preserve newlines.
+        // Also auto-detect HTML content: some dicts declare sametypesequence=m but
+        // actually contain HTML/markup (common in community StarDict dictionaries).
+        const looksLikeHtml = r.type !== 'h' && /<[a-zA-Z][^>]*>/.test(r.definition);
+        let defHtml;
+        if (r.type === 'h' || looksLikeHtml) {
+          const clean = r.definition
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '');
+          defHtml = `<div class="dict-result-def html-def">${clean}</div>`;
+        } else {
+          defHtml = `<div class="dict-result-def">${esc(r.definition).replace(/\n/g, '<br>')}</div>`;
+        }
+        return `${i > 0 ? '<hr class="dict-hr">' : ''}
+          <div class="dict-result">
+            <div class="dict-result-source">
+              ${esc(r.dictName)}${r.matchedForm && r.matchedForm !== word.toLowerCase() ? ` <span class="dict-matched-form">\u2192 ${esc(r.word)}</span>` : ''}
+            </div>
+            ${defHtml}
+          </div>`;
+      }).join('');
+    }
+  } catch {
+    resultsEl.innerHTML = '<div class="dict-empty">' + t('reader.dict_error') + '</div>';
+  }
+}
+
+function closeDictPopup() {
+  // Schedule selection clear after WORD_HIGHLIGHT_LINGER_MS so the selected word stays
+  // visible briefly after the popup closes — clearPressHighlight() removes any <mark>
+  // press-highlight and calls removeAllRanges() on the iframe window.
+  scheduleClearPressHighlight();
+  const dictPopup = document.getElementById('dict-popup');
+  if (dictPopup?.contains(document.activeElement)) document.activeElement.blur();
+  dictPopup?.classList.remove('open');
+  document.getElementById('dict-backdrop')?.classList.remove('open');
+  dictPopup?.setAttribute('aria-hidden', 'true');
+}
+
+// Receive messages from iframe contexts (origin may vary on iOS/blob views).
+window.addEventListener('message', (e) => {
+  if (e.data?.type === 'dict-lookup') {
+    const word = String(e.data.word || '').trim();
+    if (!word || word.length > 120) return;
+    if (!hasDictsEnabled()) return;
+    showDictPopup(word);
+  }
+  if (e.data?.type === 'footnote-show') {
+    const { fragId, sameDoc, rawHref } = e.data;
+    if (fragId) showFootnotePopup(fragId, sameDoc ? null : rawHref);
+  }
+  if (e.data?.type === 'annotation-select') {
+    const { cfiRange, text } = e.data;
+    if (cfiRange && text) {
+      closeFootnotePopup();
+      showAnnotationToolbar(cfiRange, text);
+    }
+  }
+  if (e.data?.type === 'annotation-click') {
+    const a = annotationsCache.find(x => x.id === e.data.id);
+    if (a) showAnnotationEditSheet(a);
+  }
+});
+
+onTap(document.getElementById('footnote-backdrop'), closeFootnotePopup);
+document.getElementById('footnote-popup-close')?.addEventListener('click', closeFootnotePopup);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeFootnotePopup();
+});
+
+// ── Settings UI ───────────────────────────────────────────────────────────────
+let _fontPickerDropdown = null;
+let _fontPickerBtn      = null;
+let _fontPickerCleanup  = null;
+
+function closeFontPicker() {
+  _fontPickerDropdown?.remove();
+  _fontPickerDropdown = null;
+  _fontPickerBtn?.setAttribute('aria-expanded', 'false');
+  _fontPickerBtn = null;
+  _fontPickerCleanup?.();
+  _fontPickerCleanup = null;
+}
+
+function openFontPicker(wrapId, { prependOptions = [], customFonts: cf, systemFonts: sf, value, onSelect }) {
+  closeFontPicker();
+  const wrap = document.getElementById(wrapId);
+  const btn  = wrap.querySelector('.font-picker-btn');
+  _fontPickerBtn = btn;
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'font-picker-dropdown';
+
+  const makeOpt = (val, label, previewFont) => {
+    const opt = document.createElement('button');
+    opt.type = 'button';
+    opt.className = 'font-picker-option' + (val === value ? ' active' : '');
+    opt.dataset.value = val;
+    const check = document.createElement('span');
+    check.className = 'font-picker-check';
+    check.textContent = '✓';
+    const name = document.createElement('span');
+    name.textContent = label;
+    if (previewFont) name.style.fontFamily = previewFont;
+    opt.appendChild(check);
+    opt.appendChild(name);
+    opt.addEventListener('click', () => { onSelect(val, label); closeFontPicker(); });
+    return opt;
+  };
+
+  prependOptions.forEach(o => dropdown.appendChild(makeOpt(o.value, o.label, null)));
+  if (prependOptions.length && (cf.length || sf.length)) {
+    const sep = document.createElement('div');
+    sep.className = 'font-picker-separator';
+    dropdown.appendChild(sep);
+  }
+  if (cf.length > 0) {
+    cf.forEach(f => dropdown.appendChild(makeOpt(f.value, f.label, f.value)));
+    const sep = document.createElement('div');
+    sep.className = 'font-picker-separator';
+    dropdown.appendChild(sep);
+  }
+  sf.forEach(f => dropdown.appendChild(makeOpt(f.value, f.label, f.value)));
+
+  document.body.appendChild(dropdown);
+  _fontPickerDropdown = dropdown;
+
+  // Position: align right edge to button's right edge, open below or above
+  const rect    = btn.getBoundingClientRect();
+  const dropW   = Math.max(rect.width, 200);
+  dropdown.style.width    = dropW + 'px';
+  dropdown.style.maxHeight = '320px';
+  const dropH   = Math.min(dropdown.scrollHeight, 320);
+  const below   = window.innerHeight - rect.bottom - 8;
+  const above   = rect.top - 8;
+  if (below >= dropH || below >= above) {
+    dropdown.style.top = (rect.bottom + 4) + 'px';
+  } else {
+    dropdown.style.top = Math.max(4, rect.top - Math.min(dropH, above) - 4) + 'px';
+  }
+  const left = Math.max(8, Math.min(rect.right - dropW, window.innerWidth - dropW - 8));
+  dropdown.style.left = left + 'px';
+
+  btn.setAttribute('aria-expanded', 'true');
+
+  // Scroll active item into view after paint
+  requestAnimationFrame(() => dropdown.querySelector('.active')?.scrollIntoView({ block: 'nearest' }));
+
+  const onOutside = e => { if (!dropdown.contains(e.target) && !wrap.contains(e.target)) closeFontPicker(); };
+  const onKey     = e => { if (e.key === 'Escape') { closeFontPicker(); btn.focus(); } };
+  requestAnimationFrame(() => document.addEventListener('pointerdown', onOutside));
+  document.addEventListener('keydown', onKey);
+  _fontPickerCleanup = () => {
+    document.removeEventListener('pointerdown', onOutside);
+    document.removeEventListener('keydown', onKey);
+  };
+}
+
+function setFontPickerLabel(wrapId, value, allFonts, placeholder) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const lbl  = wrap.querySelector('.font-picker-label');
+  const font = allFonts.find(f => f.value === value) ||
+    allFonts.find(f => f.value.split(',')[0].replace(/"/g,'').trim() ===
+                       (value||'').split(',')[0].replace(/"/g,'').trim());
+  if (font) {
+    lbl.textContent  = font.label;
+    lbl.style.fontFamily = font.value;
+  } else {
+    lbl.textContent  = placeholder || (value ? value.split(',')[0].replace(/"/g,'').trim() : '');
+    lbl.style.fontFamily = value || '';
+  }
+}
+
+function populateFontSelect() {
+  setFontPickerLabel('font-family-picker', prefs.fontFamily, [...customFonts, ...SYSTEM_FONTS]);
+  const btn = document.querySelector('#font-family-picker .font-picker-btn');
+  btn.onclick = () => {
+    if (_fontPickerBtn === btn) { closeFontPicker(); return; }
+    openFontPicker('font-family-picker', {
+      customFonts,
+      systemFonts: SYSTEM_FONTS,
+      value: prefs.fontFamily,
+      onSelect: val => {
+        prefs.fontFamily = val;
+        setFontPickerLabel('font-family-picker', val, [...customFonts, ...SYSTEM_FONTS]);
+        reapplyStyles(); persistPrefs(); updateFontPreview();
+      },
+    });
+  };
+}
+
+function updateFontPreview() {
+  const box = document.getElementById('font-preview-box');
+  if (!box) return;
+  box.textContent         = t('reader.font_preview_text');
+  box.style.fontFamily    = prefs.fontFamily || '';
+  box.style.fontSize      = prefs.fontSize + 'px';
+  box.style.lineHeight    = prefs.lineHeight;
+  box.style.letterSpacing = prefs.letterSpacing > 0 ? (prefs.letterSpacing / 10) + 'px' : '';
+}
+
+function syncSettingsUi() {
+  document.getElementById('font-size-slider').value        = prefs.fontSize;
+  document.getElementById('font-size-value').textContent   = prefs.fontSize + 'px';
+  document.getElementById('line-height-slider').value      = prefs.lineHeight;
+  document.getElementById('line-height-value').textContent = prefs.lineHeight;
+  document.getElementById('margin-slider').value           = prefs.margin;
+  document.getElementById('margin-value').textContent      = prefs.margin + 'px';
+  document.getElementById('override-styles-toggle').checked  = prefs.overrideStyles;
+  document.getElementById('autohide-header-toggle').checked  = prefs.autoHideHeader;
+  document.getElementById('keep-screen-on-toggle').checked   = prefs.keepScreenOn;
+  document.getElementById('eink-toggle').checked             = prefs.eink;
+  const openCheckEl = document.getElementById('skip-open-progress-toggle');
+  if (openCheckEl) openCheckEl.checked = prefs.skipOpenProgressCheck;
+  const saveOnCloseEl = document.getElementById('skip-save-on-close-toggle');
+  if (saveOnCloseEl) saveOnCloseEl.checked = prefs.skipSaveOnClose;
+  document.querySelectorAll('.theme-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.theme === prefs.theme));
+  const customPickersEl = document.getElementById('custom-color-pickers');
+  if (customPickersEl) customPickersEl.style.display = prefs.theme === 'custom' ? '' : 'none';
+  const customBgEl   = document.getElementById('custom-bg-color');
+  const customTextEl = document.getElementById('custom-text-color');
+  if (customBgEl)   customBgEl.value   = prefs.customBg   || '#000000';
+  if (customTextEl) customTextEl.value = prefs.customText || '#c8b89a';
+  document.querySelectorAll('.spread-btn[data-spread]').forEach(b =>
+    b.classList.toggle('active', b.dataset.spread === prefs.spread));
+  document.querySelectorAll('.page-anim-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.anim === prefs.pageTurnAnim));
+  // Finger-tracking toggle (always shown; the hint notes it applies to Paper & Momentum).
+  const dragEl = document.getElementById('page-turn-drag-toggle');
+  if (dragEl) dragEl.checked = prefs.pageTurnDrag;
+  // Edge padding
+  ['top','bottom','left','right'].forEach(side => {
+    const el = document.getElementById('edge-pad-' + side);
+    const vl = document.getElementById('edge-pad-' + side + '-value');
+    if (el) el.value = prefs.edgePadding[side];
+    if (vl) vl.textContent = prefs.edgePadding[side] + 'px';
+  });
+  const navLeftEl = document.getElementById('nav-zone-left-slider');
+  const navLeftVl = document.getElementById('nav-zone-left-value');
+  if (navLeftEl) navLeftEl.value = prefs.navZoneLeftPct ?? 20;
+  if (navLeftVl) navLeftVl.textContent = (prefs.navZoneLeftPct ?? 20) + '%';
+  const navRightEl = document.getElementById('nav-zone-right-slider');
+  const navRightVl = document.getElementById('nav-zone-right-value');
+  if (navRightEl) navRightEl.value = prefs.navZoneRightPct ?? 20;
+  if (navRightVl) navRightVl.textContent = (prefs.navZoneRightPct ?? 20) + '%';
+  const headerBtnEl = document.getElementById('header-button-size-slider');
+  const headerBtnVl = document.getElementById('header-button-size-value');
+  if (headerBtnEl) headerBtnEl.value = prefs.headerButtonScalePct ?? 100;
+  if (headerBtnVl) headerBtnVl.textContent = (prefs.headerButtonScalePct ?? 100) + '%';
+  // Paragraph options
+  const piEl = document.getElementById('para-indent-toggle');
+  if (piEl) piEl.checked = prefs.paraIndent;
+  const piSizeRow = document.getElementById('para-indent-size-row');
+  const piSizeEl  = document.getElementById('para-indent-size-slider');
+  const piSizeVl  = document.getElementById('para-indent-size-value');
+  if (piSizeRow) piSizeRow.style.display = prefs.paraIndent ? '' : 'none';
+  if (piSizeEl)  piSizeEl.value = prefs.paraIndentSize;
+  if (piSizeVl)  piSizeVl.textContent = (prefs.paraIndentSize / 10).toFixed(1) + 'em';
+  const psEl = document.getElementById('para-spacing-slider');
+  const psVl = document.getElementById('para-spacing-value');
+  if (psEl) psEl.value = prefs.paraSpacing;
+  if (psVl) psVl.textContent = (prefs.paraSpacing / 10).toFixed(1) + 'em';
+  const lsEl = document.getElementById('letter-spacing-slider');
+  const lsVl = document.getElementById('letter-spacing-value');
+  if (lsEl) lsEl.value = prefs.letterSpacing;
+  if (lsVl) lsVl.textContent = (prefs.letterSpacing / 10).toFixed(1) + 'px';
+  const chEl = document.getElementById('chap-head-spacing-toggle');
+  if (chEl) chEl.checked = prefs.chapHeadSpacing;
+  const cblEl = document.getElementById('compact-blank-lines-toggle');
+  if (cblEl) cblEl.checked = prefs.compactBlankLines;
+  const djEl = document.getElementById('disable-justify-toggle');
+  if (djEl) djEl.checked = prefs.disableJustify;
+  const mwEl = document.getElementById('mouse-wheel-nav-toggle');
+  if (mwEl) mwEl.checked = prefs.mouseWheelNav;
+  const vkEl = document.getElementById('volume-keys-toggle');
+  if (vkEl) vkEl.checked = prefs.volumeKeysEnabled;
+  const vkSwapEl = document.getElementById('volume-keys-swap-toggle');
+  if (vkSwapEl) vkSwapEl.checked = prefs.volumeKeysSwapped;
+  const plEl = document.getElementById('portrait-lock-toggle');
+  if (plEl) plEl.checked = prefs.lockPortrait;
+  const hypEl  = document.getElementById('hyphenation-toggle');
+  if (hypEl) hypEl.checked = prefs.hyphenation;
+  const hypLangEl = document.getElementById('hyphen-lang-select');
+  if (hypLangEl) {
+    hypLangEl.value = prefs.hyphenLang;
+    hypLangEl.closest('.setting-row').style.display = prefs.hyphenation ? '' : 'none';
+    // Setting .value directly doesn't fire 'change', so the custom dropdown's button label
+    // (a separate span, not the native select's own rendering) needs an explicit resync.
+    resyncSortMenu('hyphen-lang-select', 'hyphen-lang-menu-list', 'hyphen-lang-menu-label');
+  }
+  const bionicEl = document.getElementById('bionic-reading-toggle');
+  if (bionicEl) bionicEl.checked = prefs.bionicReading;
+  const pgShadowEl = document.getElementById('page-gap-shadow-toggle');
+  if (pgShadowEl) pgShadowEl.checked = prefs.pageGapShadow;
+  const fnbEl = document.getElementById('float-nav-btn-toggle');
+  if (fnbEl) fnbEl.checked = prefs.floatNavBtn;
+  const fnbOpEl = document.getElementById('float-nav-btn-opacity-slider');
+  const fnbOpVl = document.getElementById('float-nav-btn-opacity-value');
+  if (fnbOpEl) fnbOpEl.value = prefs.floatNavBtnOpacity ?? 70;
+  if (fnbOpVl) fnbOpVl.textContent = (prefs.floatNavBtnOpacity ?? 70) + '%';
+  const fnbOpRow = document.getElementById('float-nav-btn-opacity-row');
+  if (fnbOpRow) fnbOpRow.style.display = prefs.floatNavBtn ? '' : 'none';
+  const vnzEl = document.getElementById('vert-nav-zones-toggle');
+  if (vnzEl) vnzEl.checked = prefs.vertNavZones;
+  const vnzRevEl = document.getElementById('vert-nav-zones-reverse-toggle');
+  if (vnzRevEl) vnzRevEl.checked = prefs.vertNavZonesReversed;
+  const vnzRevRow = document.getElementById('vert-nav-zones-reverse-row');
+  if (vnzRevRow) vnzRevRow.style.display = prefs.vertNavZones ? '' : 'none';
+  const hba = document.getElementById('header-btn-annotations-toggle');
+  const hbs = document.getElementById('header-btn-search-toggle');
+  const hbp = document.getElementById('header-btn-percentage-toggle');
+  const hbsy = document.getElementById('header-btn-sync-toggle');
+  const hbst = document.getElementById('header-btn-sleep-timer-toggle');
+  const hbf = document.getElementById('header-btn-fullscreen-toggle');
+  const hbbb = document.getElementById('header-btn-bookmark-badge-toggle');
+  const hbab = document.getElementById('header-btn-annotation-badge-toggle');
+  if (hba)  hba.checked  = prefs.headerBtnAnnotations;
+  if (hbs)  hbs.checked  = prefs.headerBtnSearch;
+  if (hbp)  hbp.checked  = prefs.headerBtnPercentage;
+  if (hbsy) hbsy.checked = prefs.headerBtnSync;
+  if (hbst) hbst.checked = prefs.headerBtnSleepTimer;
+  if (hbf)  hbf.checked  = prefs.headerBtnFullscreen;
+  if (hbbb) hbbb.checked = prefs.bookmarkBadge;
+  if (hbab) hbab.checked = prefs.annotationBadge;
+  syncStatusBarSettings();
+  updateFontPreview();
+}
+
+// ── Status bar settings UI ────────────────────────────────────────────────────
+// Re-render all status slots from cached state (doesn't need a location object).
+// Used for immediate live updates when settings change.
+function renderStatusSlots() {
+  const pos          = prefs.statusBar.positions;
+  const isTwoPage    = currentIsTwoPage;   // authoritative state, not DOM class
+  const chapInTop    = isTwoPage && (pos.tl.includes('chapterPage') || pos.tc.includes('chapterPage') || pos.tr.includes('chapterPage'));
+  const chapInBottom = isTwoPage && (pos.bl.includes('chapterPage') || pos.bc.includes('chapterPage') || pos.br.includes('chapterPage'));
+
+  const cpIconSrc = STAT_ICON['chapterPage'];
+  const cpIcon    = (cpIconSrc && prefs.statusBar.showIcons['chapterPage'] !== false) ? sbIconHtml(cpIconSrc) + '\u202F' : '';
+  // CXReader paginates exactly, so the chapter total is the exact page count.
+  const _rsDisplayTotal   = currentChapTotal > 0 ? Math.max(currentChapTotal, currentEndPage) : 0;
+  const leftVal  = currentChapPage > 0 ? cpIcon + currentChapPage + '/' + _rsDisplayTotal : '';
+  const rightVal = currentEndPage  > 0 ? cpIcon + currentEndPage  + '/' + _rsDisplayTotal : '';
+
+  if (chapInTop) {
+    const tlOther = computeSlot(pos.tl.filter(id => id !== 'chapterPage'));
+    const tcSlot  = computeSlot(pos.tc.filter(id => id !== 'chapterPage'));
+    const trOther = computeSlot(pos.tr.filter(id => id !== 'chapterPage'));
+    sbTl.innerHTML = [leftVal,  tlOther].filter(Boolean).join('  |  ');
+    sbTc.innerHTML = tcSlot;
+    sbTr.innerHTML = [trOther, rightVal].filter(Boolean).join('  |  ');
+  } else {
+    sbTl.innerHTML = computeSlot(pos.tl);
+    sbTc.innerHTML = computeSlot(pos.tc);
+    sbTr.innerHTML = computeSlot(pos.tr);
+  }
+
+  if (chapInBottom) {
+    sbBottom.classList.add('two-page');
+    const blOther = computeSlot(pos.bl.filter(id => id !== 'chapterPage'));
+    const bcSlot  = computeSlot(pos.bc.filter(id => id !== 'chapterPage'));
+    const brOther = computeSlot(pos.br.filter(id => id !== 'chapterPage'));
+    sbBl.innerHTML = [leftVal,  blOther].filter(Boolean).join('  |  ');
+    sbBc.innerHTML = bcSlot;
+    sbBr.innerHTML = [brOther, rightVal].filter(Boolean).join('  |  ');
+    sbBottom.classList.toggle('two-page-no-center', !bcSlot);
+  } else {
+    sbBottom.classList.remove('two-page');
+    sbBottom.classList.remove('two-page-no-center');
+    sbBl.innerHTML = computeSlot(pos.bl);
+    sbBc.innerHTML = computeSlot(pos.bc);
+    sbBr.innerHTML = computeSlot(pos.br);
+  }
+}
+
+function renderSbItems() {
+  const container = document.getElementById('sb-items-list');
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Build reverse-lookup: stat id → position key
+  const posOf = {};
+  for (const [pos, ids] of Object.entries(prefs.statusBar.positions)) {
+    ids.forEach(id => { posOf[id] = pos; });
+  }
+
+  getStatusStats().forEach(({ id, icon, label }) => {
+    const curPos    = posOf[id] || 'off';
+    const iconOn    = prefs.statusBar.showIcons[id] !== false;  // default true
+    const iconHtml  = sbIconHtml(icon);
+    const row       = document.createElement('div');
+    row.className   = 'sb-item-row';
+    row.dataset.id  = id;
+    row.innerHTML   = `
+      <div class="sb-item-header">
+        <span class="sb-item-icon">${iconHtml}</span>
+        <span class="sb-item-label">${label}</span>
+        <label class="sb-icon-toggle" title="${t('reader.sb_icon_show')}">
+          <input type="checkbox" class="sb-icon-chk" ${iconOn ? 'checked' : ''}>
+          <span class="sb-icon-toggle-label">${t('reader.sb_icon_label')}</span>
+        </label>
+      </div>
+      <select class="sb-item-pos">
+        <option value="off">${t('reader.sb_pos_off')}</option>
+        <option value="tl">${t('reader.sb_pos_tl')}</option>
+        <option value="tc">${t('reader.sb_pos_tc')}</option>
+        <option value="tr">${t('reader.sb_pos_tr')}</option>
+        <option value="bl">${t('reader.sb_pos_bl')}</option>
+        <option value="bc">${t('reader.sb_pos_bc')}</option>
+        <option value="br">${t('reader.sb_pos_br')}</option>
+      </select>`;
+    row.querySelector('select').value = curPos;
+
+    row.querySelector('select').addEventListener('change', (e) => {
+      const newPos = e.target.value;
+      for (const pos of Object.keys(prefs.statusBar.positions)) {
+        prefs.statusBar.positions[pos] = prefs.statusBar.positions[pos].filter(x => x !== id);
+      }
+      if (newPos !== 'off') prefs.statusBar.positions[newPos].push(id);
+      persistPrefs();
+      renderStatusSlots();
+    });
+
+    row.querySelector('.sb-icon-chk').addEventListener('change', (e) => {
+      prefs.statusBar.showIcons[id] = e.target.checked;
+      persistPrefs();
+      renderStatusSlots();
+    });
+
+    container.appendChild(row);
+  });
+}
+
+function syncStatusBarSettings() {
+  const sb = prefs.statusBar;
+
+  // Font size slider
+  const szSlider = document.getElementById('sb-font-size-slider');
+  const szValue  = document.getElementById('sb-font-size-value');
+  if (szSlider) { szSlider.value = sb.fontSize; }
+  if (szValue)  { szValue.textContent = sb.fontSize + 'px'; }
+
+  // Style buttons
+  document.getElementById('sb-style-normal')?.classList.toggle('active', sb.fontStyle === 'normal');
+  document.getElementById('sb-style-bold')?.classList.toggle('active',   sb.fontStyle === 'bold' || sb.fontStyle === 'bold italic');
+  document.getElementById('sb-style-italic')?.classList.toggle('active', sb.fontStyle === 'italic' || sb.fontStyle === 'bold italic');
+
+  // Font picker (populated by populateSbFontSelect)
+  setFontPickerLabel('sb-font-picker', sb.font, [...customFonts, ...SYSTEM_FONTS], t('reader.sb_font_inherit'));
+
+  // Separator
+  const anySep     = sb.separatorTop || sb.separatorBottom;
+  const sepTopToggle    = document.getElementById('sb-sep-top-toggle');
+  const sepBottomToggle = document.getElementById('sb-sep-bottom-toggle');
+  const sepThickRow     = document.getElementById('sb-sep-thick-row');
+  const sepThickSlider  = document.getElementById('sb-sep-thick-slider');
+  const sepThickValue   = document.getElementById('sb-sep-thick-value');
+  if (sepTopToggle)    sepTopToggle.checked          = sb.separatorTop;
+  if (sepBottomToggle) sepBottomToggle.checked       = sb.separatorBottom;
+  if (sepThickRow)     sepThickRow.style.display     = anySep ? '' : 'none';
+  if (sepThickSlider)  sepThickSlider.value          = sb.separatorThickness;
+  if (sepThickValue)   sepThickValue.textContent     = sb.separatorThickness + 'px';
+
+  // Book progress bar
+  const bookProgToggle = document.getElementById('sb-book-prog-toggle');
+  const bookProgOpts   = document.getElementById('sb-book-prog-opts');
+  const bookProgPos    = document.getElementById('sb-book-prog-pos');
+  const bookProgThickSlider = document.getElementById('sb-book-prog-thick-slider');
+  const bookProgThickValue  = document.getElementById('sb-book-prog-thick-value');
+  if (bookProgToggle) bookProgToggle.checked         = sb.bookProgressBar.show;
+  if (bookProgOpts)   bookProgOpts.style.display     = sb.bookProgressBar.show ? '' : 'none';
+  if (bookProgPos)    bookProgPos.value               = sb.bookProgressBar.position;
+  if (bookProgThickSlider) bookProgThickSlider.value = sb.bookProgressBar.thickness;
+  if (bookProgThickValue)  bookProgThickValue.textContent = sb.bookProgressBar.thickness + 'px';
+
+  // Chapter progress bar
+  const chapProgToggle = document.getElementById('sb-chap-prog-toggle');
+  const chapProgOpts   = document.getElementById('sb-chap-prog-opts');
+  const chapProgPos    = document.getElementById('sb-chap-prog-pos');
+  const chapProgThickSlider = document.getElementById('sb-chap-prog-thick-slider');
+  const chapProgThickValue  = document.getElementById('sb-chap-prog-thick-value');
+  if (chapProgToggle) chapProgToggle.checked         = sb.chapProgressBar.show;
+  if (chapProgOpts)   chapProgOpts.style.display     = sb.chapProgressBar.show ? '' : 'none';
+  if (chapProgPos)    chapProgPos.value               = sb.chapProgressBar.position;
+  if (chapProgThickSlider) chapProgThickSlider.value = sb.chapProgressBar.thickness;
+  if (chapProgThickValue)  chapProgThickValue.textContent = sb.chapProgressBar.thickness + 'px';
+
+  // Clock format
+  const clockFmt = sb.clockFormat || '24h';
+  document.getElementById('sb-clock-12h')?.classList.toggle('active', clockFmt === '12h');
+  document.getElementById('sb-clock-24h')?.classList.toggle('active', clockFmt === '24h');
+}
+
+function populateSbFontSelect() {
+  const btn = document.querySelector('#sb-font-picker .font-picker-btn');
+  if (!btn) return;
+  const inheritLabel = t('reader.sb_font_inherit');
+  setFontPickerLabel('sb-font-picker', prefs.statusBar.font, [...customFonts, ...SYSTEM_FONTS], inheritLabel);
+  btn.onclick = () => {
+    if (_fontPickerBtn === btn) { closeFontPicker(); return; }
+    openFontPicker('sb-font-picker', {
+      prependOptions: [{ value: '', label: inheritLabel }],
+      customFonts,
+      systemFonts: SYSTEM_FONTS,
+      value: prefs.statusBar.font || '',
+      onSelect: val => {
+        prefs.statusBar.font = val;
+        setFontPickerLabel('sb-font-picker', val, [...customFonts, ...SYSTEM_FONTS], inheritLabel);
+        applyStatusBarStyles(); persistPrefs();
+      },
+    });
+  };
+}
+
+function initStatusBarSettings() {
+  renderSbItems();
+
+  // Font size
+  document.getElementById('sb-font-size-slider')?.addEventListener('input', (e) => {
+    prefs.statusBar.fontSize = parseInt(e.target.value);
+    document.getElementById('sb-font-size-value').textContent = prefs.statusBar.fontSize + 'px';
+    applyStatusBarStyles(); persistPrefs();
+  });
+
+  // Style buttons (toggle independently; bold+italic = 'bold italic')
+  function updateFontStyle(bold, italic) {
+    if (bold && italic) prefs.statusBar.fontStyle = 'bold italic';
+    else if (bold)      prefs.statusBar.fontStyle = 'bold';
+    else if (italic)    prefs.statusBar.fontStyle = 'italic';
+    else                prefs.statusBar.fontStyle = 'normal';
+    syncStatusBarSettings();
+    applyStatusBarStyles(); persistPrefs();
+  }
+  document.getElementById('sb-style-normal')?.addEventListener('click', () => {
+    updateFontStyle(false, false);
+  });
+  document.getElementById('sb-style-bold')?.addEventListener('click', () => {
+    const cur = prefs.statusBar.fontStyle;
+    const italic = cur.includes('italic');
+    const bold   = !cur.includes('bold');
+    updateFontStyle(bold, italic);
+  });
+  document.getElementById('sb-style-italic')?.addEventListener('click', () => {
+    const cur = prefs.statusBar.fontStyle;
+    const bold   = cur.includes('bold');
+    const italic = !cur.includes('italic');
+    updateFontStyle(bold, italic);
+  });
+
+  // Separators
+  function updateSepThickRow() {
+    const show = prefs.statusBar.separatorTop || prefs.statusBar.separatorBottom;
+    document.getElementById('sb-sep-thick-row').style.display = show ? '' : 'none';
+  }
+  document.getElementById('sb-sep-top-toggle')?.addEventListener('change', (e) => {
+    prefs.statusBar.separatorTop = e.target.checked;
+    updateSepThickRow();
+    applyStatusBarStyles(); persistPrefs();
+  });
+  document.getElementById('sb-sep-bottom-toggle')?.addEventListener('change', (e) => {
+    prefs.statusBar.separatorBottom = e.target.checked;
+    updateSepThickRow();
+    applyStatusBarStyles(); persistPrefs();
+  });
+  document.getElementById('sb-sep-thick-slider')?.addEventListener('input', (e) => {
+    prefs.statusBar.separatorThickness = parseInt(e.target.value);
+    document.getElementById('sb-sep-thick-value').textContent = prefs.statusBar.separatorThickness + 'px';
+    applyStatusBarStyles(); persistPrefs();
+  });
+
+  // Book progress bar
+  document.getElementById('sb-book-prog-toggle')?.addEventListener('change', (e) => {
+    prefs.statusBar.bookProgressBar.show = e.target.checked;
+    document.getElementById('sb-book-prog-opts').style.display = e.target.checked ? '' : 'none';
+    applyProgressBarLayout(); persistPrefs();
+  });
+  document.getElementById('sb-book-prog-pos')?.addEventListener('change', (e) => {
+    prefs.statusBar.bookProgressBar.position = e.target.value;
+    applyProgressBarLayout(); persistPrefs();
+  });
+  document.getElementById('sb-book-prog-thick-slider')?.addEventListener('input', (e) => {
+    prefs.statusBar.bookProgressBar.thickness = parseInt(e.target.value);
+    document.getElementById('sb-book-prog-thick-value').textContent = prefs.statusBar.bookProgressBar.thickness + 'px';
+    applyProgressBarLayout(); persistPrefs();
+  });
+
+  // Chapter progress bar
+  document.getElementById('sb-chap-prog-toggle')?.addEventListener('change', (e) => {
+    prefs.statusBar.chapProgressBar.show = e.target.checked;
+    document.getElementById('sb-chap-prog-opts').style.display = e.target.checked ? '' : 'none';
+    applyProgressBarLayout(); persistPrefs();
+  });
+  document.getElementById('sb-chap-prog-pos')?.addEventListener('change', (e) => {
+    prefs.statusBar.chapProgressBar.position = e.target.value;
+    applyProgressBarLayout(); persistPrefs();
+  });
+  document.getElementById('sb-chap-prog-thick-slider')?.addEventListener('input', (e) => {
+    prefs.statusBar.chapProgressBar.thickness = parseInt(e.target.value);
+    document.getElementById('sb-chap-prog-thick-value').textContent = prefs.statusBar.chapProgressBar.thickness + 'px';
+    applyProgressBarLayout(); persistPrefs();
+  });
+
+  // Clock format
+  ['12h', '24h'].forEach(fmt => {
+    document.getElementById(`sb-clock-${fmt}`)?.addEventListener('click', () => {
+      prefs.statusBar.clockFormat = fmt;
+      syncStatusBarSettings();
+      updateStatusBar();
+      persistPrefs();
+    });
+  });
+}
+
+function initSliderButtons() {
+  const panel = document.getElementById('settings-panel');
+  if (!panel) return;
+  panel.querySelectorAll('input[type="range"]').forEach(input => {
+    const inlineFlex = input.style.flex === '1';
+    const minWidth   = input.style.minWidth || '';
+
+    const row = document.createElement('div');
+    row.className = 'slider-row';
+    if (inlineFlex) {
+      row.style.flex = '1';
+      if (minWidth) row.style.minWidth = minWidth;
+      input.style.removeProperty('flex');
+      input.style.removeProperty('min-width');
+    }
+
+    const minus = document.createElement('button');
+    minus.type = 'button';
+    minus.className = 'slider-btn';
+    minus.textContent = '−';
+    minus.setAttribute('aria-label', '−');
+
+    const plus = document.createElement('button');
+    plus.type = 'button';
+    plus.className = 'slider-btn';
+    plus.textContent = '+';
+    plus.setAttribute('aria-label', '+');
+
+    const step     = parseFloat(input.step) || 1;
+    const minVal   = parseFloat(input.min);
+    const maxVal   = parseFloat(input.max);
+    const decimals = (String(step).split('.')[1] || '').length;
+
+    function nudge(dir) {
+      const next = Math.min(maxVal, Math.max(minVal,
+        parseFloat((parseFloat(input.value) + dir * step).toFixed(decimals))
+      ));
+      if (next === parseFloat(input.value)) return;
+      input.value = next;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    minus.addEventListener('click', () => nudge(-1));
+    plus.addEventListener('click',  () => nudge(+1));
+
+    input.parentNode.insertBefore(row, input);
+    row.appendChild(minus);
+    row.appendChild(input);
+    row.appendChild(plus);
+  });
+}
+
+function initSettingsUi() {
+  populateFontSelect();
+  populateSbFontSelect();
+
+  document.getElementById('btn-reset-book-prefs')?.addEventListener('click', () => {
+    if (!currentBook?.id) return;
+    clearBookPrefs(currentBook.id);
+    // Reload global prefs and re-apply
+    const global = loadPrefs();
+    PER_BOOK_KEYS.forEach(k => { prefs[k] = global[k]; });
+    syncSettingsUi();
+    reapplyStyles();
+    applyUiTheme();
+    applyPageShadow();
+    updateBookPrefsIndicator();
+  });
+
+  document.getElementById('font-size-slider').addEventListener('input', (e) => {
+    prefs.fontSize = parseInt(e.target.value);
+    document.getElementById('font-size-value').textContent = prefs.fontSize + 'px';
+    reapplyStyles(); persistPrefs(); updateFontPreview();
+  });
+  document.getElementById('line-height-slider').addEventListener('input', (e) => {
+    prefs.lineHeight = parseFloat(parseFloat(e.target.value).toFixed(1));
+    document.getElementById('line-height-value').textContent = prefs.lineHeight;
+    reapplyStyles(); persistPrefs(); updateFontPreview();
+  });
+  document.getElementById('margin-slider').addEventListener('input', (e) => {
+    prefs.margin = parseInt(e.target.value);
+    document.getElementById('margin-value').textContent = prefs.margin + 'px';
+    // CXReader two-column mode: update the inter-column gap before re-applying CSS so
+    // _initPaginator uses the new gap (it's set via setLayout, not derived from CSS).
+    if (_cxReader) _cxReader.setLayout({ columnGap: prefs.margin * 2 });
+    reapplyStyles();
+    persistPrefs();
+  });
+  document.getElementById('override-styles-toggle').addEventListener('change', (e) => {
+    prefs.overrideStyles = e.target.checked;
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('autohide-header-toggle').addEventListener('change', (e) => {
+    prefs.autoHideHeader = e.target.checked;
+    applyAutoHide(); persistPrefs();
+  });
+  document.getElementById('keep-screen-on-toggle').addEventListener('change', (e) => {
+    prefs.keepScreenOn = e.target.checked;
+    if (prefs.keepScreenOn) acquireWakeLock(); else releaseWakeLock();
+    persistPrefs();
+  });
+
+  document.getElementById('eink-toggle').addEventListener('change', (e) => {
+    prefs.eink = e.target.checked;
+    applyUiTheme(); reapplyStyles(); persistPrefs();
+  });
+
+  // Paragraph options
+  document.getElementById('para-indent-toggle')?.addEventListener('change', (e) => {
+    prefs.paraIndent = e.target.checked;
+    const sizeRow = document.getElementById('para-indent-size-row');
+    if (sizeRow) sizeRow.style.display = prefs.paraIndent ? '' : 'none';
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('para-indent-size-slider')?.addEventListener('input', (e) => {
+    prefs.paraIndentSize = parseInt(e.target.value);
+    const vl = document.getElementById('para-indent-size-value');
+    if (vl) vl.textContent = (prefs.paraIndentSize / 10).toFixed(1) + 'em';
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('para-spacing-slider')?.addEventListener('input', (e) => {
+    prefs.paraSpacing = parseInt(e.target.value);
+    const vl = document.getElementById('para-spacing-value');
+    if (vl) vl.textContent = (prefs.paraSpacing / 10).toFixed(1) + 'em';
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('letter-spacing-slider')?.addEventListener('input', (e) => {
+    prefs.letterSpacing = parseFloat(e.target.value);
+    const vl = document.getElementById('letter-spacing-value');
+    if (vl) vl.textContent = (prefs.letterSpacing / 10).toFixed(1) + 'px';
+    reapplyStyles(); persistPrefs(); updateFontPreview();
+  });
+  document.getElementById('chap-head-spacing-toggle')?.addEventListener('change', (e) => {
+    prefs.chapHeadSpacing = e.target.checked;
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('compact-blank-lines-toggle')?.addEventListener('change', (e) => {
+    prefs.compactBlankLines = e.target.checked;
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('disable-justify-toggle')?.addEventListener('change', (e) => {
+    prefs.disableJustify = e.target.checked;
+    log('[justify] toggle changed → disableJustify:', prefs.disableJustify);
+    reapplyStyles();
+    // Debug: log computed text-align on first <p> in iframe after styles applied
+    setTimeout(() => {
+      try {
+        const doc = _cxReader?._renderer?.iframe?.contentDocument;
+        if (doc) {
+          const p = doc.querySelector('p');
+          const styleEl = doc.getElementById('br-custom-styles');
+          log('[justify] br-custom-styles in iframe:', styleEl ? styleEl.textContent.slice(0, 300) : '(not found)');
+          if (p) {
+            const computed = doc.defaultView?.getComputedStyle(p);
+            log('[justify] first <p> computed text-align:', computed?.textAlign);
+            log('[justify] first <p> inline style text-align:', p.style.textAlign);
+            // Log all stylesheets affecting the iframe
+            const sheets = [...(doc.styleSheets || [])];
+            sheets.forEach((sheet, i) => {
+              try {
+                const rules = [...sheet.cssRules].map(r => r.cssText).join('\n');
+                if (rules.includes('text-align') || rules.includes('justify')) {
+                  log(`[justify] stylesheet[${i}] href:`, sheet.href || '(inline)', '\n', rules.slice(0, 500));
+                }
+              } catch { /* cross-origin */ }
+            });
+          }
+        }
+      } catch (e) { warn('[justify] debug error:', e.message); }
+    }, 200);
+    persistPrefs();
+  });
+  document.getElementById('mouse-wheel-nav-toggle')?.addEventListener('change', (e) => {
+    prefs.mouseWheelNav = e.target.checked;
+    persistPrefs();
+  });
+  document.getElementById('volume-keys-toggle')?.addEventListener('change', (e) => {
+    prefs.volumeKeysEnabled = e.target.checked;
+    applyVolumeKeyMode(prefs.volumeKeysEnabled);
+    persistPrefs();
+  });
+  document.getElementById('volume-keys-swap-toggle')?.addEventListener('change', (e) => {
+    prefs.volumeKeysSwapped = e.target.checked;
+    persistPrefs();
+  });
+  // Show the native-app settings section for Android app and iOS Capacitor app
+  const androidSection = document.getElementById('android-settings-section');
+  if (androidSection) androidSection.style.display = (isAndroidApp() || isIOSApp()) ? '' : 'none';
+  // Show portrait lock section on mobile/PWA/Android (any touch device or installed PWA)
+  const portraitSection = document.getElementById('portrait-lock-section');
+  if (portraitSection) {
+    const showPortrait = isAndroidApp() || navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches;
+    portraitSection.style.display = showPortrait ? '' : 'none';
+  }
+  document.getElementById('portrait-lock-toggle')?.addEventListener('change', (e) => {
+    prefs.lockPortrait = e.target.checked;
+    void applyPortraitLock(prefs.lockPortrait);
+    persistPrefs();
+  });
+  document.getElementById('skip-open-progress-toggle')?.addEventListener('change', (e) => {
+    prefs.skipOpenProgressCheck = e.target.checked;
+    persistPrefs();
+  });
+  document.getElementById('skip-save-on-close-toggle')?.addEventListener('change', (e) => {
+    prefs.skipSaveOnClose = e.target.checked;
+    persistPrefs();
+  });
+  document.getElementById('hyphenation-toggle')?.addEventListener('change', (e) => {
+    prefs.hyphenation = e.target.checked;
+    const langRow = document.getElementById('hyphen-lang-select')?.closest('.setting-row');
+    if (langRow) langRow.style.display = prefs.hyphenation ? '' : 'none';
+    reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('hyphen-lang-select')?.addEventListener('change', (e) => {
+    prefs.hyphenLang = e.target.value;
+    reapplyStyles(); persistPrefs();
+  });
+  // Same checkmark-dropdown widget as the library's sort menu — this panel is static/persistent
+  // (built once, just shown/hidden), so the default document-scoped listeners are fine here.
+  initSortMenuFor('hyphen-lang-select', 'hyphen-lang-menu-btn', 'hyphen-lang-menu-label', 'hyphen-lang-menu-list');
+  document.getElementById('bionic-reading-toggle')?.addEventListener('change', (e) => {
+    prefs.bionicReading = e.target.checked;
+    persistPrefs();
+    saveBionicReloadState();
+    location.reload();
+  });
+  document.getElementById('page-gap-shadow-toggle')?.addEventListener('change', (e) => {
+    prefs.pageGapShadow = e.target.checked;
+    applyPageShadow(); persistPrefs();
+  });
+  document.getElementById('page-turn-drag-toggle')?.addEventListener('change', (e) => {
+    prefs.pageTurnDrag = e.target.checked;
+    persistPrefs();
+  });
+
+  // Edge padding sliders
+  ['top','bottom','left','right'].forEach(side => {
+    document.getElementById('edge-pad-' + side)?.addEventListener('input', (e) => {
+      prefs.edgePadding[side] = parseInt(e.target.value);
+      document.getElementById('edge-pad-' + side + '-value').textContent = prefs.edgePadding[side] + 'px';
+      applyEdgePadding(); persistPrefs();
+    });
+  });
+
+  document.getElementById('nav-zone-left-slider')?.addEventListener('input', (e) => {
+    prefs.navZoneLeftPct = parseInt(e.target.value);
+    document.getElementById('nav-zone-left-value').textContent = prefs.navZoneLeftPct + '%';
+    applyNavZones(); persistPrefs();
+  });
+  document.getElementById('nav-zone-right-slider')?.addEventListener('input', (e) => {
+    prefs.navZoneRightPct = parseInt(e.target.value);
+    document.getElementById('nav-zone-right-value').textContent = prefs.navZoneRightPct + '%';
+    applyNavZones(); persistPrefs();
+  });
+  document.getElementById('header-button-size-slider')?.addEventListener('input', (e) => {
+    prefs.headerButtonScalePct = parseInt(e.target.value);
+    const vl = document.getElementById('header-button-size-value');
+    if (vl) vl.textContent = prefs.headerButtonScalePct + '%';
+    applyHeaderButtonSize(); persistPrefs();
+  });
+
+  // One-handed navigation toggles
+  document.getElementById('float-nav-btn-toggle')?.addEventListener('change', (e) => {
+    prefs.floatNavBtn = e.target.checked;
+    const opRow = document.getElementById('float-nav-btn-opacity-row');
+    if (opRow) opRow.style.display = prefs.floatNavBtn ? '' : 'none';
+    applyFloatNavBtn(); persistPrefs();
+  });
+  document.getElementById('float-nav-btn-opacity-slider')?.addEventListener('input', (e) => {
+    prefs.floatNavBtnOpacity = parseInt(e.target.value);
+    const vl = document.getElementById('float-nav-btn-opacity-value');
+    if (vl) vl.textContent = prefs.floatNavBtnOpacity + '%';
+    applyFloatNavBtn(); persistPrefs();
+  });
+  document.getElementById('vert-nav-zones-toggle')?.addEventListener('change', (e) => {
+    prefs.vertNavZones = e.target.checked;
+    const row = document.getElementById('vert-nav-zones-reverse-row');
+    if (row) row.style.display = prefs.vertNavZones ? '' : 'none';
+    persistPrefs();
+  });
+  document.getElementById('vert-nav-zones-reverse-toggle')?.addEventListener('change', (e) => {
+    prefs.vertNavZonesReversed = e.target.checked;
+    persistPrefs();
+  });
+
+  // Header button visibility toggles
+  [
+    ['header-btn-annotations-toggle', 'headerBtnAnnotations'],
+    ['header-btn-search-toggle',      'headerBtnSearch'],
+    ['header-btn-percentage-toggle',  'headerBtnPercentage'],
+    ['header-btn-sync-toggle',        'headerBtnSync'],
+    ['header-btn-sleep-timer-toggle', 'headerBtnSleepTimer'],
+    ['header-btn-fullscreen-toggle',  'headerBtnFullscreen'],
+  ].forEach(([id, key]) => {
+    document.getElementById(id)?.addEventListener('change', (e) => {
+      prefs[key] = e.target.checked;
+      applyHeaderBtnVisibility(); persistPrefs();
+    });
+  });
+
+  // Count badge toggles
+  document.getElementById('header-btn-bookmark-badge-toggle')?.addEventListener('change', (e) => {
+    prefs.bookmarkBadge = e.target.checked;
+    updateBookmarkBadge(); persistPrefs();
+  });
+  document.getElementById('header-btn-annotation-badge-toggle')?.addEventListener('change', (e) => {
+    prefs.annotationBadge = e.target.checked;
+    updateAnnotationBadge(); persistPrefs();
+  });
+
+  // Dictionary popup close
+  document.getElementById('dict-popup-close').addEventListener('click', closeDictPopup);
+  document.getElementById('dict-backdrop').addEventListener('click', closeDictPopup);
+
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      prefs.theme = btn.dataset.theme;
+      applyUiTheme(); reapplyStyles(); syncSettingsUi(); persistPrefs();
+    });
+  });
+  document.getElementById('custom-bg-color')?.addEventListener('input', e => {
+    prefs.customBg = e.target.value;
+    applyUiTheme(); reapplyStyles(); persistPrefs();
+  });
+  document.getElementById('custom-text-color')?.addEventListener('input', e => {
+    prefs.customText = e.target.value;
+    applyUiTheme(); reapplyStyles(); persistPrefs();
+  });
+  document.querySelectorAll('.spread-btn[data-spread]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      prefs.spread = btn.dataset.spread;
+      syncSettingsUi(); persistPrefs();
+      if (_cxReader) _cxSyncLayout();   // re-paginate CXReader in place
+    });
+  });
+
+  document.querySelectorAll('.page-anim-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      prefs.pageTurnAnim = btn.dataset.anim;
+      syncSettingsUi(); persistPrefs();
+    });
+  });
+
+  syncSettingsUi();
+  initStatusBarSettings();
+  applyStatusBarStyles();
+  applyEdgePadding();
+  applyNavZones();
+  applyHeaderButtonSize();
+  applyHeaderBtnVisibility();
+  initFloatNavBtn();
+  applyFloatNavBtn();
+  applyPageShadow();
+  initSliderButtons();
+}
+
+// ── Progress ──────────────────────────────────────────────────────────────────
+
+
+function scheduleProgressSave() {
+  // no-op — chapter-boundary + close saving replaces the debounce
+}
+
+// Navigate to a percentage using jump + forward seek.
+// cfiFromPercentage returns range CFIs that display() mishandles, so we
+// jump close then advance with next() until percentage matches.
+async function seekToPercentage(targetPct) {
+  if (!_cxReader) return;
+  await _cxReader.goToPct(targetPct);
+  _cxReader.seekToPercent(targetPct); // fine-tune to exact page within the chapter
+}
+
+// ── Book language normalisation ───────────────────────────────────────────────
+// Maps raw EPUB dc:language values (inconsistent: "EN", "eng", "English", "en-US"…)
+// to ISO 639-1 two-letter codes, or null if unrecognised.
+function normalizeBookLang(raw) {
+  if (!raw) return null;
+  let s = String(raw).trim().toLowerCase();
+  // Strip region subtag (en-US → en, zh-Hant → zh)
+  s = s.replace(/-.*$/, '');
+  // ISO 639-3 → 639-1
+  const iso3 = { eng:'en', ger:'de', deu:'de', slv:'sl', fra:'fr', fre:'fr',
+                 ita:'it', spa:'es', por:'pt', nld:'nl', dut:'nl', rus:'ru',
+                 zho:'zh', chi:'zh', jpn:'ja', kor:'ko', ara:'ar', tur:'tr',
+                 pol:'pl', ces:'cs', cze:'cs', slo:'sk', slk:'sk', hrv:'hr',
+                 ron:'ro', rum:'ro', hun:'hu', fin:'fi', swe:'sv', dan:'da',
+                 nor:'no', nob:'no', nno:'no', cat:'ca', lat:'la' };
+  if (iso3[s]) return iso3[s];
+  // English display names
+  const names = { english:'en', german:'de', slovenian:'sl', french:'fr', italian:'it',
+                  spanish:'es', portuguese:'pt', dutch:'nl', russian:'ru', chinese:'zh',
+                  japanese:'ja', korean:'ko', arabic:'ar', turkish:'tr', polish:'pl',
+                  czech:'cs', slovak:'sk', croatian:'hr', romanian:'ro', hungarian:'hu',
+                  finnish:'fi', swedish:'sv', danish:'da', norwegian:'no', catalan:'ca',
+                  latin:'la' };
+  if (names[s]) return names[s];
+  // Accept bare 2-letter code
+  if (/^[a-z]{2}$/.test(s)) return s;
+  return null;
+}
+
+// ── External + internal kosync ────────────────────────────────────────────────
+// KOReader identifies books by MD5 of file content — use file_hash_md5 so our
+// entries in Grimmory line up with what KOReader stores there.
+function externalDocKey() {
+  // Priority: user-supplied KOReader hash > computed MD5 > SHA-256 fallback
+  return currentBook.kosync_hash || currentBook.file_hash_md5 || currentBook.file_hash;
+}
+
+// Generate a KOReader-compatible xpointer for the current position.
+// If we have a precise xpointer received from KOReader for the current chapter,
+// re-use it so KOReader can navigate to the exact paragraph, not just chapter start.
+// Falls back to chapter-start xpointer when on a different chapter or no cached value.
+function koReaderXPointer() {
+  if (lastKnownXPointer) {
+    const m = lastKnownXPointer.match(/\/body\/DocFragment\[(\d+)\]/);
+    if (m && parseInt(m[1]) === currentSpineIndex + 1) {
+      return lastKnownXPointer;
+    }
+  }
+  return '/body/DocFragment[' + (currentSpineIndex + 1) + ']/body';
+}
+
+async function fetchRemoteProgress(docKey) {
+  try { return await apiFetch(`/kosync/remote/${encodeURIComponent(docKey)}`); }
+  catch { return null; }
+}
+
+async function fetchInternalProgress(docKey) {
+  try { return await apiFetch(`/kosync/internal/${encodeURIComponent(docKey)}`); }
+  catch { return null; }
+}
+
+async function pushRemoteProgress(docKey, xpointer, pct) {
+  try {
+    const r = await apiFetch(`/kosync/remote/${encodeURIComponent(docKey)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        document:   docKey,
+        progress:   xpointer,
+        percentage: pct,
+        device:     'Codexa',
+        device_id:  'codexa-web',
+      }),
+    });
+    if (r?.pushed)           _kosyncPushFailures = 0;
+    else if (r?.status !== 404) _trackKosyncFailure(r?.status || 0);
+    // 404 = book not in external server's library — expected, not a config error
+  } catch { _kosyncPushFailures = 0; }
+}
+
+function _trackKosyncFailure(status) {
+  _kosyncPushFailures++;
+  if (_kosyncPushFailures < 2 || _kosyncWarnedThisSession) return;
+  if (status === 0) return; // network offline — not a mismatch
+  _kosyncWarnedThisSession = true;
+  const msgKey = (status === 401 || status === 403)
+    ? 'reader.kosync_warn_auth'
+    : 'reader.kosync_warn_mismatch';
+  toast.warn(t(msgKey));
+}
+
+function pushInternalProgress(docKey, xpointer, pct, force = false) {
+  const qs = force ? '?force=1' : '';
+  return apiFetch(`/kosync/internal/${encodeURIComponent(docKey)}${qs}`, {
+    method: 'PUT',
+    body: JSON.stringify({ progress: xpointer, percentage: pct, device: 'Codexa', device_id: 'codexa-web' }),
+  }).catch(() => {});
+}
+
+// The BookOrbit progress push triggered server-side by the kosync-internal PUT above is
+// fire-and-forget (no latency added to page turns), so its outcome isn't known yet when
+// that request resolves. Check shortly after via the passive (no network-to-BookOrbit)
+// last-status endpoint. `always` shows the toast unconditionally (manual push button);
+// otherwise it's shown once per book load, matching the existing KOSync warning pattern.
+function checkBookorbitStatus({ always = false } = {}) {
+  if (!always && _bookorbitWarnedThisSession) return;
+  setTimeout(() => {
+    apiFetch('/bookorbit/last-status').then(s => {
+      if (!s?.enabled || s.reachable !== false) return;
+      if (!always) _bookorbitWarnedThisSession = true;
+      toast.warn(t('reader.bookorbit_unreachable'));
+    }).catch(() => {}); // non-critical — never surface as a hard failure
+  }, 1500);
+}
+
+function cancelDebouncedSync() {
+  if (syncDebounceTimer) {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = null;
+  }
+}
+
+function stopPeriodicSync() {
+  if (syncIntervalTimer) {
+    clearInterval(syncIntervalTimer);
+    syncIntervalTimer = null;
+  }
+}
+
+// Subscribe to online/offline events. Triggers a status-bar refresh on change.
+function initOnlineStatus() {
+  const refresh = () => {
+    _isOnline = navigator.onLine;
+    updateStatusBar();
+  };
+  window.addEventListener('online',  refresh);
+  window.addEventListener('offline', refresh);
+}
+
+// Initialise the Battery Status API once. Triggers a status-bar refresh on any change.
+// Silently no-ops on browsers that don't support it (Firefox, Safari, iOS).
+async function initBattery() {
+  if (_batteryMgr || !navigator.getBattery) return;
+  try {
+    _batteryMgr = await navigator.getBattery();
+    const refresh = () => { updateStatusBar(); };
+    _batteryMgr.addEventListener('levelchange',   refresh);
+    _batteryMgr.addEventListener('chargingchange', refresh);
+    refresh(); // apply immediately
+  } catch { /* not available */ }
+}
+
+function startPeriodicSync() {
+  stopPeriodicSync();
+  syncIntervalTimer = setInterval(() => {
+    if (!isReady || !currentBook) return;
+    log('[kosync] periodic local save (4 min)');
+    void saveProgress({ allowRemote: false });
+  }, SYNC_INTERVAL_MS);
+}
+
+function scheduleDebouncedSync() {
+  if (!isReady || !currentBook) return;
+  cancelDebouncedSync();
+  syncDebounceTimer = setTimeout(() => {
+    syncDebounceTimer = null;
+    if (!isReady || !currentBook) return;
+    log('[kosync] debounced local save (60s inactivity)');
+    void saveProgress({ allowRemote: false });
+  }, SYNC_DEBOUNCE_MS);
+}
+
+async function saveProgress({ forceRemote = false, allowRemote = true, inSession = false, forced = false, forceLocal = false } = {}) {
+  if (!currentBook || !isReady) return;
+  if (isPeekMode) return;
+  const cfi = currentCfi || '';
+  const pct = currentPct > 0 ? currentPct : lastKnownGoodPct;
+  if (!cfi && pct === 0) return;
+  log('[pos] SAVE cfi:', cfi.slice(0,60), 'pct:', (pct*100).toFixed(2)+'%');
+  if (window.parent) {
+    window.parent.postMessage({
+      type: 'cx-progress',
+      cfi: cfi,
+      percent: Math.round(pct * 100)
+    }, '*');
+  }
+  const docKey = externalDocKey();
+  const posChanged = cfi !== openCfi;
+  // Skip remote push when position hasn't moved since the last successful remote sync.
+  // `forced` bypasses this — used for the manual sync button so the user can always re-push
+  // even if lastSyncedCfi matches (e.g. another device overwrote the server behind our back).
+  const alreadySynced = !forced && cfi !== '' && cfi === lastSyncedCfi;
+  const shouldPushRemote = !alreadySynced && pct > 0 && (inSession || !prefs.skipSaveOnClose) && (forceRemote || (allowRemote && posChanged));
+  // Never push to cross-device kosync if it would overwrite a higher known position.
+  // `forced` (manual sync with user confirmation) is allowed to push backwards.
+  const wouldGoBackwards = !forced && pct < bestKnownRemotePct - 0.005;
+  const shouldPushKosync = shouldPushRemote && !wouldGoBackwards;
+  if (wouldGoBackwards && shouldPushRemote) {
+    log('[kosync] saveProgress: skipping kosync push — would go backwards:', Math.round(pct * 100) + '% < known best ' + Math.round(bestKnownRemotePct * 100) + '%');
+  }
+  log('[kosync] saveProgress docKey:', docKey, 'cfi:', cfi.slice(0, 40), 'pct:', Math.round(pct * 100) + '%', shouldPushKosync ? '' : (alreadySynced ? '(already synced)' : wouldGoBackwards ? '(would go backwards)' : '(no remote push)'));
+  // Local save: use force:true when the reader is closing (forceLocal) or the user is force-pushing
+  // backwards (forced).  The server's high-water mark only makes sense for passive cross-device
+  // updates — the active reader always knows the user's real current page.
+  const progressPayload = { cfi_position: cfi, percentage: pct, device: 'Codexa', ...((forced || forceLocal) ? { force: true } : {}) };
+  const saves = [
+    apiFetch(`/progress/${currentBook.file_hash}`, {
+      method: 'PUT',
+      body: JSON.stringify(progressPayload),
+    }).then(() => {
+      if (pct > 0) {
+        const cachePayload = { cfi_position: cfi, percentage: pct, device: 'Codexa' };
+        try { localStorage.setItem(`br_progress_${currentBook.file_hash}`, JSON.stringify(cachePayload)); } catch { /* ignore */ }
+      }
+      // Online save reached the server — drop any queued offline position for this book.
+      clearProgress(currentBook.id);
+    }).catch(() => {
+      // Offline / unreachable — queue this position so it syncs (incl. KOSync) on reconnect.
+      if (pct > 0) queueProgress({ bookId: currentBook.id, fileHash: currentBook.file_hash, cfi, pct, xpointer: koReaderXPointer() });
+    }),
+  ];
+  if (shouldPushKosync) {
+    saves.push(pushRemoteProgress(docKey, koReaderXPointer(), pct));
+    saves.push(pushInternalProgress(docKey, koReaderXPointer(), pct, forced));
+  }
+  await Promise.allSettled(saves);
+  if (shouldPushKosync) {
+    lastSyncedCfi = cfi; // record what we just synced
+    bestKnownRemotePct = pct; // update high-water mark (may go down if user confirmed backwards)
+    checkBookorbitStatus();
+  }
+}
+
+// Fire-and-forget version used when navigating away — uses keepalive:true so
+// the browser keeps the requests alive even after the page unloads.
+function saveProgressBackground({ inSession = false } = {}) {
+  if (!currentBook || !isReady) return;
+  if (isPeekMode) return;
+  const cfi = currentCfi || '';
+  const pct = currentPct > 0 ? currentPct : lastKnownGoodPct;
+  if (!cfi && pct === 0) return;
+  const token = getToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+  const opts = (body) => ({ method: 'PUT', headers, body: JSON.stringify(body), keepalive: true });
+  const docKey = externalDocKey();
+  const xp     = koReaderXPointer();
+  const posChanged    = cfi !== openCfi;
+  // CXReader CFIs are chapter-level only, so posChanged misses within-chapter movement.
+  // Track pct change from open to catch the case where the user read pages within the same chapter.
+  const pctChanged    = Math.abs(pct - openPct) > 0.001;
+  // force:true only when position changed — prevents an open-then-tab-close from
+  // overwriting the server's good value with the imprecise CFI-display starting page.
+  fetch(`/api/progress/${currentBook.file_hash}`, opts({ cfi_position: cfi, percentage: pct, device: 'Codexa', ...((posChanged || pctChanged) ? { force: true } : {}) })).catch(() => {});
+  if (pct > 0) {
+    try { localStorage.setItem(`br_progress_${currentBook.file_hash}`, JSON.stringify({ cfi_position: cfi, percentage: pct, device: 'Codexa' })); } catch { /* ignore */ }
+    // Close path uses keepalive fetch whose success can't be observed on unload.
+    // Queue the position unconditionally; the flush is idempotent (skips/clears
+    // entries the server already has) so an online close self-heals on next flush.
+    queueProgress({ bookId: currentBook.id, fileHash: currentBook.file_hash, cfi, pct, xpointer: xp });
+  }
+  // Push to KOSync on close whenever position moved (chapter changed OR within-chapter pct changed).
+  // Periodic/debounced saves intentionally skip KOSync; close is the designated sync point.
+  if (pct > 0 && !prefs.skipSaveOnClose && (posChanged || pctChanged) && pct >= bestKnownRemotePct - 0.005) {
+    fetch(`/api/kosync/remote/${encodeURIComponent(docKey)}`,   opts({ document: docKey, progress: xp, percentage: pct, device: 'Codexa', device_id: 'codexa-web' })).catch(() => {});
+    fetch(`/api/kosync/internal/${encodeURIComponent(docKey)}`, opts({ progress: xp, percentage: pct, device: 'Codexa', device_id: 'codexa-web' })).catch(() => {});
+    if (pct > bestKnownRemotePct) bestKnownRemotePct = pct;
+  }
+}
+
+// ── KOReader sync-on-open dialog ──────────────────────────────────────────────
+function showSyncDialog(best, localPct, localTime) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    const rPct   = parseFloat(((best.percentage || 0) * 100).toFixed(2));
+    const lPct   = parseFloat(((localPct        || 0) * 100).toFixed(2));
+    const fmtTs  = (ts) => ts ? new Date(ts * 1000).toLocaleString(getCurrentLang()) : t('reader.sync_dlg_unknown_time');
+    const rDate  = fmtTs(best.timestamp);
+    const lDate  = fmtTs(localTime);
+    const rNewer = (best.percentage || 0) >= localPct; // show the forward position as the highlight
+    backdrop.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" style="max-width:460px">
+        <h3 style="margin:0 0 .5rem;font-size:1rem;font-weight:600">${t('reader.sync_dlg_title')}</h3>
+        <p style="margin:0 0 1rem;font-size:.82rem;color:var(--color-text-muted)">${t('reader.sync_dlg_hint')}</p>
+        <table style="width:100%;font-size:.85rem;border-collapse:collapse;margin-bottom:1.5rem">
+          <thead>
+            <tr style="color:var(--color-text-muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em">
+              <th style="text-align:left;padding:.3rem 0">${t('reader.sync_dlg_col_device')}</th>
+              <th style="text-align:right;padding:.3rem 0">${t('reader.sync_dlg_col_pos')}</th>
+              <th style="text-align:right;padding:.3rem 0">${t('reader.sync_dlg_col_time')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="${rNewer ? 'font-weight:600' : ''}">
+              <td style="padding:.3rem 0">${best.device || 'KOReader'} ${rNewer ? '▲' : ''}</td>
+              <td style="text-align:right">${rPct}%</td>
+              <td style="text-align:right;color:var(--color-text-muted);font-size:.78rem">${rDate}</td>
+            </tr>
+            <tr style="${!rNewer ? 'font-weight:600' : ''}">
+              <td style="padding:.3rem 0">${t('reader.sync_dlg_this_reader')} ${!rNewer ? '▲' : ''}</td>
+              <td style="text-align:right">${lPct}%</td>
+              <td style="text-align:right;color:var(--color-text-muted);font-size:.78rem">${lDate}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="sync-dlg-ignore">${t('reader.sync_dlg_keep', { pct: lPct })}</button>
+          <button class="btn btn-primary"   id="sync-dlg-yes">${t('reader.sync_dlg_jump', { pct: rPct })}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const close = (ok) => { backdrop.remove(); resolve(ok); };
+    backdrop.querySelector('#sync-dlg-yes').addEventListener('click',    () => close(true));
+    backdrop.querySelector('#sync-dlg-ignore').addEventListener('click', () => close(false));
+    // Backdrop click defaults to Jump (the forward/safe direction — never accidentally go backwards)
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(true); });
+  });
+}
+
+// Check external + internal sources; prompt user if a newer position exists.
+// Called AFTER the rendition is visible so the user sees the book while deciding.
+async function syncOnOpen(localProgress) {
+  const docKey = externalDocKey();
+  log('[kosync] syncOnOpen docKey:', docKey);
+  const [extResult, intResult] = await Promise.allSettled([
+    fetchRemoteProgress(docKey),
+    fetchInternalProgress(docKey),
+  ]);
+  const ext = extResult.status === 'fulfilled' ? extResult.value : null;
+  const int = intResult.status === 'fulfilled' ? intResult.value : null;
+  log('[kosync] remote:', ext, 'internal:', int);
+
+  // Pick the freshest remote source
+  let best = null;
+  if (ext?.progress) best = ext;
+  if (int?.progress && (!best || (int.timestamp || 0) > (best.timestamp || 0))) best = int;
+  if (!best?.progress) {
+    log('[kosync] no remote progress found');
+    return null;
+  }
+
+  // Cache the precise xpointer so we can push it back unchanged when on the same chapter.
+  // This prevents overwriting KOReader's /body/DocFragment[N]/body/div/p[M]/text().K
+  // with a coarser chapter-start xpointer.
+  if (best.progress.startsWith('/body/DocFragment[')) {
+    lastKnownXPointer = best.progress;
+  }
+
+  const localPct  = localProgress?.percentage  || 0;
+  const localTime = localProgress?.updated_at  || 0;
+  const bestTime  = best.timestamp             || 0;
+  log('[kosync] best:', best.device, Math.round((best.percentage||0)*100)+'%', 'ts:', bestTime, 'localTime:', localTime);
+
+  // Always advance the high-water mark; ensures we never push backwards later
+  const remoteHighWater = Math.max(localPct, best.percentage || 0);
+  if (remoteHighWater > bestKnownRemotePct) {
+    bestKnownRemotePct = remoteHighWater;
+    log('[kosync] bestKnownRemotePct →', Math.round(bestKnownRemotePct * 100) + '%');
+  }
+
+  // If the remote xpointer exactly matches our last-pushed xpointer, both readers
+  // are at the same paragraph — skip the dialog even if percentages differ (they
+  // are on different scales and the mismatch is expected, not a real position gap).
+  // NOTE: this optimisation only makes sense when comparing an EXTERNAL position
+  // (ext) with what the web reader last wrote to the internal store (int).
+  // When best === int (KOReader pushes directly here, no external server), both
+  // sides would be the same object → always a match → dialog never shows.
+  // In that case set localXPointer to null so we fall through to the pct check.
+  const localXPointer = (best !== int) ? (int?.progress || null) : null;
+  const xpointerMatch = !!(localXPointer && best.progress && localXPointer === best.progress);
+  log('[kosync] xpointerMatch:', xpointerMatch, 'local:', localXPointer, 'remote:', best.progress);
+
+  const pctDiffers = Math.abs((best.percentage || 0) - localPct) > 0.01;
+  // Never silently jump backwards — only prompt when the remote is ahead.
+  // If remote is behind local, it means we already synced more recently from this
+  // device (e.g. the hide-beacon fired but localProgress hasn't updated yet).
+  const remoteIsAhead = (best.percentage || 0) > localPct + 0.005;
+  // Exception: if the remote was saved MORE RECENTLY than our local progress (e.g.
+  // user deliberately pushed KOSync backwards to re-read a chapter), honour it even
+  // when it is behind.  Require >60 s gap to avoid spurious prompts from normal
+  // concurrent saves, and >0.5 % difference so trivial floating-point drift is ignored.
+  const remoteIsNewerAndDiffers =
+    bestTime > localTime + 60 &&
+    Math.abs((best.percentage || 0) - localPct) > 0.005;
+  if (!xpointerMatch && ((pctDiffers && remoteIsAhead) || remoteIsNewerAndDiffers)) {
+    const doSync = await showSyncDialog(best, localPct, localTime);
+    if (doSync) return { percentage: best.percentage, progress: best.progress };
+  }
+  return null;
+}
+
+// Called on reconnect (Android wake-from-standby, the 'online' event, or the native
+// Android hook). Unlike syncOnOpen() (used at book-open time, which prompts via a
+// confirmation dialog before jumping across devices), this path is fully automatic —
+// the user just watched the status indicator flip to "online" and expects the reader
+// to settle itself with no prompt: push our position if we're ahead, silently jump if
+// the remote is ahead, do nothing if they already match.
+async function networkRestoreSync() {
+  if (!currentBook || !isReady) return;
+  try {
+    const docKey = externalDocKey();
+    const [extResult, intResult] = await Promise.allSettled([
+      fetchRemoteProgress(docKey),
+      fetchInternalProgress(docKey),
+    ]);
+    const ext = extResult.status === 'fulfilled' ? extResult.value : null;
+    const int = intResult.status === 'fulfilled' ? intResult.value : null;
+    let best = null;
+    if (ext?.progress) best = ext;
+    if (int?.progress && (!best || (int.timestamp || 0) > (best.timestamp || 0))) best = int;
+    if (!best?.progress) { log('[kosync] networkRestoreSync: no remote progress found'); return; }
+
+    const remotePct = best.percentage || 0;
+    if (remotePct > bestKnownRemotePct) bestKnownRemotePct = remotePct;
+
+    if (remotePct <= currentPct + 0.005) {
+      // We're ahead or tied — nothing to pull. flushProgressOutbox (called by the trigger
+      // below, before this runs) already pushed anything queued while genuinely offline;
+      // the normal saveProgress high-water logic covers the rest. Equal case: no-op.
+      log('[kosync] networkRestoreSync: local at/ahead of remote (' + Math.round(currentPct * 100) + '% vs ' + Math.round(remotePct * 100) + '%) — nothing to pull');
+      return;
+    }
+
+    log('[kosync] networkRestoreSync: auto-pulling remote position', Math.round(remotePct * 100) + '%');
+    if (best.progress.startsWith('/body/DocFragment[')) lastKnownXPointer = best.progress;
+    if (_cxReader) {
+      await _cxReader.goToPct(remotePct);
+      _cxReader.seekToPercent(remotePct);
+      currentCfi = _cxReader.makeCfi();
+    }
+    currentPct = remotePct;
+    lastSyncedCfi = currentCfi;
+    toast.success(t('reader.kosync_auto_pull_done', { pct: Math.round(remotePct * 100) }));
+  } catch (e) { warn('[kosync] networkRestoreSync failed:', e.message); }
+}
+window.__codexaNetworkRestore = () => triggerNetworkRestore('native');
+
+// Throttled entry point for the auto KOSync push/pull. Several triggers can fire close
+// together (the 'online' event, the wake/visibility path, the native Android hook), so
+// coalesce them. Flushing the offline-progress outbox runs regardless of whether this
+// reader's book has finished loading yet; the pull comparison needs a loaded book, so it's
+// gated inside networkRestoreSync itself.
+let _lastNetRestore = 0;
+function triggerNetworkRestore(reason) {
+  if (!navigator.onLine) return;
+  const now = Date.now();
+  if (now - _lastNetRestore < 3000) return; // coalesce near-simultaneous triggers
+  _lastNetRestore = now;
+  log('[kosync] networkRestore trigger:', reason);
+  flushProgressOutbox().then(({ bookIds }) => {
+    if (currentBook && bookIds.includes(currentBook.id)) {
+      toast.success(t('reader.kosync_push_done', { pct: Math.round(currentPct * 100) }));
+    }
+  }).catch(() => {});
+  networkRestoreSync().catch(() => {});
+}
+
+// Schedule a wake-sync after the page becomes visible again. The 'online' event is unreliable
+// in Android WebView once the page has been frozen during device sleep, and Wi-Fi may still be
+// reconnecting at wake time, so retry briefly until the network is back.
+function scheduleWakeSync() {
+  let tries = 0;
+  const attempt = () => {
+    if (document.visibilityState !== 'visible' || tries++ > 5) return;
+    if (navigator.onLine) triggerNetworkRestore('wake');
+    else setTimeout(attempt, 1500);
+  };
+  setTimeout(attempt, 800);
+}
+
+window.addEventListener('online', () => {
+  // Offline-progress outbox flush + KOSync pull both happen inside triggerNetworkRestore now.
+  if (!currentBook) return;
+  syncOfflineBookmarks(currentBook.id).catch(() => {});
+  syncOfflineAnnotations(currentBook.id).catch(() => {});
+  triggerNetworkRestore('online');
+});
+
+
+function isMobileScreen() { return window.innerWidth < 640; }
+
+// True when the reader should show two side-by-side columns: spread enabled, not a phone-width
+// screen, and the viewer is wide enough. Shared by epub.js (locs cache key) and CXReader.
+function cxWantsTwoCol() {
+  const w = epubViewer?.clientWidth || window.innerWidth;
+  return prefs.spread === 'auto' && !isMobileScreen() && w >= 800;
+}
+
+// Push the current column-mode decision into the live CXReader (re-paginates if needed).
+function _cxSyncLayout() {
+  if (!_cxReader) return;
+  _cxReader.setLayout({ twoColumn: cxWantsTwoCol(), columnGap: prefs.margin * 2 });
+}
+
+function _cxRelocatedHandler(e) {
+  if (pendingNavDirection) _pageEnter(pendingNavDirection);
+  pendingNavDirection = null;
+  const oldSpineIndex = currentSpineIndex;
+  const { spineIndex, href, page, pageCount, endPage, twoColumn } = e.detail;
+  currentSpineIndex = spineIndex;
+  currentHref       = href;
+  currentChapPage   = page;
+  currentEndPage    = endPage ?? page;
+  currentChapTotal  = pageCount;
+  currentIsTwoPage  = !!twoColumn;
+  currentCfi = _cxReader?.makeCfi() || '';
+  currentPct = _cxReader?.makePct() || 0;
+  if (currentPct > 0) lastKnownGoodPct = currentPct;
+  if (currentBook) {
+    try {
+      localStorage.setItem(`br_cx_page_${currentBook.id}`,
+        JSON.stringify({ spineIdx: spineIndex, page }));
+    } catch { /* quota */ }
+  }
+  // Feed the chapter page-count cache so bookPage / timeLeftBook estimates improve over time
+  if (pageCount > 0) chapPageCache[spineIndex] = pageCount;
+  log(`[CXReader] relocated spine=${spineIndex} page=${page}/${pageCount} pct=${(currentPct*100).toFixed(1)}%`);
+  trackReadingSpeed();
+  renderStatusSlots();
+  updateActiveTocItem(href);
+  // First cx-relocated: status bars now have content → measure real inset and reinit
+  // paginator so page boundaries reflect the visible area (not the full viewer height).
+  if (!_cxViewerPaddingSet && _cxReader) {
+    _cxViewerPaddingSet = true;
+    _cxMeasureViewerInset();
+    if (_cxViewerPadTop > 0 || _cxViewerPadBot > 0) {
+      if (_cxReader._isCbz) {
+        _cxReader.setCbzInset(_cxViewerPadTop, _cxViewerPadBot);
+      } else {
+        _cxReader.reinitPaginator();
+        // Re-sync ALL page vars (not just the total) from the inset-corrected paginator, and
+        // refresh the cache, so the very first page shows the right page/total immediately.
+        currentChapPage  = _cxReader.page;
+        currentEndPage   = _cxReader.endPage;
+        currentChapTotal = _cxReader.pageCount;
+        if (currentChapTotal > 0) chapPageCache[spineIndex] = currentChapTotal;
+        renderStatusSlots();
+      }
+    }
+  }
+  if (isReady) {
+    const crossedChapter = oldSpineIndex !== null && spineIndex !== oldSpineIndex;
+    if (crossedChapter) {
+      // Chapter boundary — mirror epub.js: force remote push, log visit, reset debounce.
+      const alreadySent = href === lastSentChapterHref;
+      const bookmarkPending = !!preBookmarkCfi;
+      saveProgress({ forceRemote: !alreadySent && !bookmarkPending, allowRemote: !alreadySent && !bookmarkPending });
+      cancelDebouncedSync();
+      writeInterruptedSession();
+      if (currentBook) logChapterVisit(currentBook.id, href, chapterLabelFromHref(href));
+      if (!alreadySent && !bookmarkPending) lastSentChapterHref = href;
+    } else if (currentPct > 0) {
+      // Within-chapter page turn — debounce remote push (matches epub.js pattern).
+      scheduleDebouncedSync();
+    }
+
+    // True end of book — CXReader's pct is a page-fraction that never actually reaches 1.0
+    // (see server/utils/bookCompletion.js), so detect the real last page directly instead:
+    // last page of the last spine item. Not shown in peek mode (peek never saves progress).
+    const spineTotal = _cxReader?.spine?.length || 0;
+    const atBookEnd = pageCount > 0 && page >= pageCount && spineTotal > 0 && spineIndex === spineTotal - 1;
+    if (atBookEnd && !_finishedMessageShown && !isPeekMode) {
+      _finishedMessageShown = true;
+      saveProgress({ forceRemote: true }).catch(() => {});
+      showBookFinishedOverlay();
+    }
+  }
+  _attachCxKbd(_cxReader?.iframe);
+  _attachCxDict(_cxReader?.iframe);
+  _attachCxTouchNav(_cxReader?.iframe);
+  if (_cxReader?.iframe) {
+    try {
+      _cxReader.iframe.focus();
+      if (_cxReader.iframe.contentWindow) {
+        _cxReader.iframe.contentWindow.focus();
+      }
+    } catch (e) {
+      log('[reader] failed to focus iframe:', e);
+    }
+  }
+}
+
+// Shown once automatically the moment the reader lands on the true last page of the book, and
+// again on demand (see goNext()) if the user presses "next" again while already there.
+function showBookFinishedOverlay() {
+  if (document.querySelector('.book-finished-backdrop')) return; // already showing — avoid stacking
+  const bd = document.createElement('div');
+  bd.className = 'modal-backdrop book-finished-backdrop';
+  bd.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" style="max-width:420px;text-align:center">
+      <div class="book-finished-icon" style="font-size:2.5rem;margin-bottom:.5rem">🎉</div>
+      <h3 style="margin:0 0 .75rem;font-size:1.05rem;font-weight:600">${t('reader.book_finished_title')}</h3>
+      <p style="margin:0 0 1.5rem;font-size:.85rem;line-height:1.5;color:var(--color-text-muted)">
+        ${t('reader.book_finished_body', { title: escapeHtml(currentBook?.title || '') })}
+      </p>
+      <div class="modal-footer" style="justify-content:center">
+        <button class="btn btn-secondary" id="book-finished-continue">${t('reader.book_finished_continue')}</button>
+        <button class="btn btn-primary"   id="book-finished-close">${t('reader.book_finished_close')}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(bd);
+  const close = () => bd.remove();
+  bd.querySelector('#book-finished-continue').addEventListener('click', close);
+  bd.querySelector('#book-finished-close').addEventListener('click', () => { close(); void returnToLibrary(); });
+  bd.addEventListener('click', e => { if (e.target === bd) close(); });
+}
+
+function _attachCxKbd(iframe) {
+  if (!iframe?.contentWindow || iframe === _cxKbdIframe) return;
+  _cxKbdIframe = iframe;
+  iframe.contentWindow.addEventListener('keydown', (e) => {
+    if (IFRAME_NAV_KEYS.has(e.key)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') goPrev();
+      else goNext();
+      return;
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: e.key, bubbles: true }));
+  }, true);
+  iframe.contentWindow.addEventListener('wheel', (e) => {
+    if (!prefs.mouseWheelNav) return;
+    document.dispatchEvent(new CustomEvent('br-wheel', { detail: { deltaY: e.deltaY } }));
+  }, { passive: true });
+}
+
+// Returns a spine-level CFI for the current CXReader chapter (fallback when range is unavailable).
+function _cxMakeCfi() {
+  const n = ((_cxReader?.spineIdx ?? 0) + 1) * 2;
+  return `epubcfi(/6/${n}!/4/2/1:0)`;
+}
+
+// Walk from node to documentElement, building the CFI step path (e.g. "/4/2/1").
+// Elements get even steps (2, 4, …); text nodes get odd steps (1, 3, …).
+function _cxCfiNodePath(node, doc) {
+  const parts = [];
+  let cur = node;
+  while (cur && cur !== doc.documentElement) {
+    const parent = cur.parentNode;
+    if (!parent) break;
+    let eIdx = 0, tIdx = 0, pos;
+    for (const child of parent.childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE)      eIdx += 2;
+      else if (child.nodeType === Node.TEXT_NODE) tIdx = tIdx === 0 ? 1 : tIdx + 2;
+      if (child === cur) { pos = child.nodeType === Node.ELEMENT_NODE ? eIdx : tIdx; break; }
+    }
+    if (pos !== undefined) parts.unshift('/' + pos);
+    cur = parent;
+  }
+  return parts.join('');
+}
+
+// Build a real range CFI from a DOM selection range — used when creating CXReader annotations.
+function _cxCfiFromRange(range) {
+  if (!range || !_cxReader) return _cxMakeCfi();
+  try {
+    const spineN = (_cxReader.spineIdx + 1) * 2;
+    const doc = range.startContainer.ownerDocument;
+    const startPath = _cxCfiNodePath(range.startContainer, doc) + ':' + range.startOffset;
+    const endPath   = _cxCfiNodePath(range.endContainer,   doc) + ':' + range.endOffset;
+    return `epubcfi(/6/${spineN}!${startPath},${endPath})`;
+  } catch {
+    return _cxMakeCfi();
+  }
+}
+
+// Resolve a range CFI produced by _cxCfiFromRange back to a DOM Range.
+function _cxRangeFromCfi(cfi, doc) {
+  if (!cfi || !doc) return null;
+  try {
+    const inner = cfi.replace(/^epubcfi\(/, '').replace(/\)$/, '');
+    const bang = inner.indexOf('!');
+    if (bang < 0) return null;
+    const docPart = inner.slice(bang + 1);
+    const comma = docPart.indexOf(',');
+    if (comma < 0) return null;
+    const startStr = docPart.slice(0, comma);
+    const endStr   = docPart.slice(comma + 1);
+
+    function resolveStep(pathStr, root) {
+      const colon = pathStr.lastIndexOf(':');
+      const offset = colon >= 0 ? parseInt(pathStr.slice(colon + 1), 10) : 0;
+      const navStr = colon >= 0 ? pathStr.slice(0, colon) : pathStr;
+      const steps = navStr.split('/').filter(Boolean).map(Number);
+      let cur = root;
+      for (const n of steps) {
+        let eIdx = 0, tIdx = 0, found = false;
+        for (const child of cur.childNodes) {
+          if (child.nodeType === Node.ELEMENT_NODE)      eIdx += 2;
+          else if (child.nodeType === Node.TEXT_NODE) tIdx = tIdx === 0 ? 1 : tIdx + 2;
+          const childPos = child.nodeType === Node.ELEMENT_NODE ? eIdx : tIdx;
+          if (childPos === n) { cur = child; found = true; break; }
+        }
+        if (!found) return null;
+      }
+      return { node: cur, offset };
+    }
+
+    const root  = doc.documentElement;
+    const start = resolveStep(startStr, root);
+    const end   = resolveStep(endStr,   root);
+    if (!start || !end) return null;
+    const r = doc.createRange();
+    r.setStart(start.node, start.offset);
+    r.setEnd(end.node, end.offset);
+    return r;
+  } catch {
+    return null;
+  }
+}
+
+// Called from CXReader.onBeforePaginate — injects bionic/annotations BEFORE paginator
+// measures scrollHeight so that DOM changes from bionic wrapping are already in place.
+function _cxApplyHooks(iframe) {
+  if (!iframe?.contentDocument) return;
+  const _ahDoc = iframe.contentDocument;
+
+  // Mark whitespace-only <p> elements with data-br-blank so the compactBlankLines CSS rule
+  // can hide them. CSS p:empty only matches truly childless elements; many EPUBs use spacer
+  // paragraphs containing only whitespace/&nbsp;/<br> which don't match p:empty.
+  // Always mark regardless of pref state so toggling compactBlankLines via reapplyCss()
+  // takes effect immediately without re-parsing the chapter.
+  const _CX_BLANK_RE = /^[\s\u00a0\u200b]*$/;
+  for (const p of _ahDoc.querySelectorAll('p')) {
+    if (!p.querySelector(':not(br)') && _CX_BLANK_RE.test(p.textContent)) {
+      p.setAttribute('data-br-blank', '1');
+    } else {
+      p.removeAttribute('data-br-blank');
+    }
+  }
+  // Also apply/remove inline styles directly \u2014 Chrome 83 WebView does not reliably
+  // re-evaluate CSS attribute selectors inside iframes when the attribute is set
+  // dynamically after initial load. Inline style bypasses that entirely.
+  for (const p of _ahDoc.querySelectorAll('p[data-br-blank]')) {
+    if (prefs.compactBlankLines) {
+      p.style.setProperty('display', 'none', 'important');
+      p.style.setProperty('margin',  '0',    'important');
+      p.style.setProperty('padding', '0',    'important');
+    } else {
+      p.style.removeProperty('display');
+      p.style.removeProperty('margin');
+      p.style.removeProperty('padding');
+    }
+  }
+  // Strip whitespace-only text nodes that sit between block-level siblings.
+  // Some EPUBs use &#13; (carriage return) between <p> elements rather than inside them;
+  // these text nodes are invisible in white-space:normal but can create visible gaps when
+  // the parent has white-space:pre-line, or via browser strut-height on anonymous blocks.
+  if (prefs.compactBlankLines) {
+    const _BLOCK_EL = /^(P|DIV|SECTION|ARTICLE|H[1-6]|BLOCKQUOTE|FIGURE|HEADER|FOOTER|ASIDE|MAIN)$/;
+    const _wkr = _ahDoc.createTreeWalker(_ahDoc.body, NodeFilter.SHOW_TEXT);
+    const _strip = [];
+    let _tn;
+    while ((_tn = _wkr.nextNode())) {
+      if (!_CX_BLANK_RE.test(_tn.nodeValue)) continue;
+      const prev = _tn.previousSibling;
+      const next = _tn.nextSibling;
+      if ((prev && prev.nodeType === 1 && _BLOCK_EL.test(prev.nodeName)) ||
+          (next && next.nodeType === 1 && _BLOCK_EL.test(next.nodeName))) {
+        _strip.push(_tn);
+      }
+    }
+    for (const _n of _strip) _n.remove();
+  }
+
+  injectIntoContents({
+    document: _ahDoc,
+    window: iframe.contentWindow,
+    sectionIndex: _cxReader?.spineIdx ?? 0,
+    cfiFromRange: _cxCfiFromRange,
+    range: (cfi) => _cxRangeFromCfi(cfi, _ahDoc),
+  });
+}
+
+// Attach dictionary, annotation-select, and footnote handlers to a CXReader iframe (once per iframe).
+function _attachCxDict(iframe) {
+  if (!iframe?.contentDocument || iframe === _cxDictIframe) return;
+  _cxDictIframe = iframe;
+  const _adDoc = iframe.contentDocument;
+  const shim = {
+    document: _adDoc,
+    window: iframe.contentWindow,
+    sectionIndex: _cxReader?.spineIdx ?? 0,
+    cfiFromRange: _cxCfiFromRange,
+    range: (cfi) => _cxRangeFromCfi(cfi, _adDoc),
+  };
+  attachIframeDictionary(shim);
+  attachIframeAnnotation(shim);
+  // Footnote interception: marks footnote links with data-footnote-href (removing href so
+  // the renderer's generic cx-link handler doesn't intercept them and navigate to the
+  // chapter start), then adds capture-phase listeners that post footnote-show messages.
+  attachIframeFootnotes(shim);
+}
+
+// Forward swipe/tap touch events from inside the CXReader iframe to the parent handlers.
+// attachIframeTouchNav expects a view-like object with contents.window and element.
+function _attachCxTouchNav(iframe) {
+  if (!iframe?.contentWindow || iframe === _cxTouchNavIframe) return;
+  _cxTouchNavIframe = iframe;
+  attachIframeTouchNav({ contents: { window: iframe.contentWindow }, element: iframe });
+}
+
+// Measure how many px each status bar overlaps the epub-viewer, store in module vars.
+// Called AFTER renderStatusSlots() so the bars have real content and non-zero height.
+function _cxMeasureViewerInset() {
+  const viewer = document.getElementById('epub-viewer');
+  if (!viewer) return;
+  const vr  = viewer.getBoundingClientRect();
+  const top = document.getElementById('sb-top');
+  const bot = document.getElementById('sb-bottom');
+  _cxViewerPadTop = top ? Math.max(0, Math.ceil(top.getBoundingClientRect().bottom - vr.top) + 8) : 0;
+  _cxViewerPadBot = bot ? Math.max(0, Math.ceil(vr.bottom - bot.getBoundingClientRect().top) + 14) : 0;
+}
+
+// Apply measured inset directly to the iframe element so the paginator's clientHeight
+// reflects only the visible area. Must be called before paginator.init() measures height.
+function _cxApplyIframeInset(iframe) {
+  if (!iframe) return;
+  const inset = _cxViewerPadTop + _cxViewerPadBot;
+  iframe.style.marginTop = _cxViewerPadTop > 0 ? `${_cxViewerPadTop}px` : '';
+  iframe.style.height    = inset > 0 ? `calc(100% - ${inset}px)` : '100%';
+}
+
+async function startCXRendition(displayCfi = null) {
+  _cxViewerPaddingSet = false;
+  _cxViewerPadTop = 0;
+  _cxViewerPadBot = 0;
+  _cxTouchNavIframe = null;
+  const viewer = document.getElementById('epub-viewer');
+  viewer.innerHTML = '';
+
+  // Remove any old cx-relocated listener before attaching a fresh one
+  viewer.removeEventListener('cx-relocated', _cxRelocatedHandler);
+
+  // Destroy any previous CXReader instance before creating a new one
+  if (_cxReader) { try { _cxReader.destroy(); } catch {} _cxReader = null; }
+
+  viewer.addEventListener('cx-relocated', _cxRelocatedHandler);
+
+  // Intercept in-book <a> clicks posted from the iframe via postMessage
+  if (_cxLinkHandler) window.removeEventListener('message', _cxLinkHandler);
+  _cxLinkHandler = (e) => {
+    if (e.data?.type !== 'cx-link' || !_cxReader) return;
+    void _cxReader.goToHref(e.data.href);
+  };
+  window.addEventListener('message', _cxLinkHandler);
+
+  try {
+    const { CXReader } = await import('./cxreader/index.js');
+    _cxReader = new CXReader();
+    _cxReader.onBeforePaginate = (iframe) => { _cxApplyIframeInset(iframe); _cxApplyHooks(iframe); };
+
+    await _cxReader.open(_epubArrayBuffer);
+    if (_cxReader.toc?.length) {
+      buildToc(_cxReader.toc);
+      buildChapterMarkers();
+    } else {
+      tocListEl.innerHTML = '<div class="toc-empty">' + t('reader.toc_none') + '</div>';
+    }
+
+    // Determine start spine index from saved CFI (e.g. epubcfi(/6/18!/...))
+    let _cxStartIdx = 0;
+    if (displayCfi) {
+      const _m = String(displayCfi).match(/^epubcfi\(\/6\/(\d+)!/);
+      if (_m) _cxStartIdx = Math.max(0, Math.floor(parseInt(_m[1], 10) / 2) - 1);
+    }
+
+    // Choose single/two-column BEFORE the first render so page counts are correct from page 1.
+    _cxReader.setLayout({ twoColumn: cxWantsTwoCol(), columnGap: prefs.margin * 2 });
+
+    const readerCss = buildEpubCss();
+    await _cxReader.renderChapter(_cxStartIdx, viewer, readerCss);
+    applyHeaderBtnVisibility();
+
+    log('[CXReader] chapter 0 rendered');
+  } catch (err) {
+    console.error('[CXReader] startCXRendition failed:', err);
+    const errEl = document.createElement('div');
+    errEl.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-muted);padding:2rem;text-align:center';
+    errEl.textContent = 'CXReader error: ' + (err.message || err);
+    viewer.appendChild(errEl);
+  }
+
+  isReady = true;
+}
+
+// CXReader is the only reader engine; this keeps the historical entry-point name.
+async function startRendition(displayCfi = null) {
+  await startCXRendition(displayCfi);
+}
+
+// ── Page turn animation ───────────────────────────────────────────────────────
+// Host-level animations (fade / slide / zoom) animate the #epub-viewer host as one
+// layer and work on both engines. 'paper' and 'momentum' instead animate the
+// cxReader engine's own page slide (see _cxSlideTurn) so the next page genuinely
+// scrolls in; on the epub.js engine they fall back to the host-level slide.
+const _HOST_ANIM_CLASSES = ['anim-fade', 'anim-slide', 'anim-zoom'];
+function _pageTurnAnimClass() {
+  if (prefs.pageTurnAnim === 'zoom') return 'anim-zoom';
+  if (prefs.pageTurnAnim === 'slide' || prefs.pageTurnAnim === 'paper' || prefs.pageTurnAnim === 'momentum') return 'anim-slide';
+  return 'anim-fade';
+}
+
+function _pageExit(dir) {
+  if (_useEngineSlide()) return;   // cxReader paper/momentum handled by the engine slide
+  if (prefs.eink || !prefs.pageTurnAnim || prefs.pageTurnAnim === 'none') return;
+  const v = document.getElementById('epub-viewer');
+  if (!v) return;
+  v.classList.remove('page-exit', 'page-enter', 'dir-next', 'dir-prev', ..._HOST_ANIM_CLASSES);
+  v.classList.add('page-exit', _pageTurnAnimClass(), dir === 'prev' ? 'dir-prev' : 'dir-next');
+}
+
+function _pageEnter(dir) {
+  if (_useEngineSlide()) return;
+  if (prefs.eink || !prefs.pageTurnAnim || prefs.pageTurnAnim === 'none') return;
+  const v = document.getElementById('epub-viewer');
+  if (!v) return;
+  v.classList.remove('page-exit', 'page-enter', 'dir-next', 'dir-prev', ..._HOST_ANIM_CLASSES);
+  v.classList.add('page-enter', _pageTurnAnimClass(), dir === 'prev' ? 'dir-prev' : 'dir-next');
+  // Remove enter classes after animation completes to leave element clean
+  const onEnd = () => {
+    v.classList.remove('page-enter', 'dir-next', 'dir-prev', ..._HOST_ANIM_CLASSES);
+    v.removeEventListener('animationend', onEnd);
+  };
+  v.addEventListener('animationend', onEnd, { once: true });
+}
+
+// ── Engine page-slide (cxReader 'paper' / 'momentum') ─────────────────────────
+// cxReader holds the whole chapter in one iframe and pages by sliding the body
+// with translateX. Easing that transform gives a real page slide where the next
+// page scrolls in — no second layer, no capture. 'paper' adds a soft spine
+// shadow; 'momentum' uses a weightier easing. Touches no engine code: we set the
+// transition on the live body, let the engine change the transform, then clear it.
+let _slideClrTimer = 0;
+
+function _slideCapable() { return !prefs.eink && !_isLegacyWv; }
+
+function _useEngineSlide() {
+  return (prefs.pageTurnAnim === 'paper' || prefs.pageTurnAnim === 'momentum')
+    && !!_cxReader
+    && !_cxReader._isCbz && !_cxReader._isFixedLayout
+    && _slideCapable();
+}
+
+function _showTurnShadow(dir, dur) {
+  const v = document.getElementById('epub-viewer');
+  if (!v) return;
+  let sh = document.getElementById('turn-shadow');
+  if (!sh) { sh = document.createElement('div'); sh.id = 'turn-shadow'; v.appendChild(sh); }
+  sh.className = dir === 'prev' ? 'dir-prev' : 'dir-next';
+  sh.style.animation = 'none';
+  void sh.offsetWidth;                 // reflow to restart the pulse
+  sh.style.animation = `turn-shadow-pulse ${dur}ms ease`;
+}
+
+function _cxSlideTurn(dir) {
+  const pag  = _cxReader?._paginator;
+  const body = _cxReader?.iframe?.contentDocument?.body;
+  sessionPageCount++;
+  if (!pag || !body) { pendingNavDirection = dir; void _cxReader?.[dir]?.(); return; }
+  // At a chapter edge the turn re-renders the iframe, so there's nothing to slide
+  // in place — just advance and let the new chapter appear.
+  const atBoundary = dir === 'next' ? pag.isAtEnd : pag.isAtStart;
+  if (atBoundary) { pendingNavDirection = null; void _cxReader[dir](); return; }
+  pendingNavDirection = null;          // the engine slide is the visual — skip host _pageEnter
+  const momentum = prefs.pageTurnAnim === 'momentum';
+  const dur  = momentum ? 300 : 270;
+  const ease = momentum ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.33,0,.25,1)';
+  body.style.transition = `transform ${dur}ms ${ease}`;
+  if (prefs.pageTurnAnim === 'paper') _showTurnShadow(dir, dur);
+  void _cxReader[dir]();                // synchronously changes body transform → animates
+  clearTimeout(_slideClrTimer);
+  _slideClrTimer = setTimeout(() => {
+    const b = _cxReader?.iframe?.contentDocument?.body;
+    if (b) b.style.transition = '';
+  }, dur + 80);
+}
+
+// ── Finger-tracking drag (cxReader 'paper' / 'momentum') ──────────────────────
+// Live 1:1 drag of the engine's translateX, committing on release by distance or
+// fling velocity. Active for both paper and momentum (paper also tracks its spine
+// shadow), and only when the pageTurnDrag toggle is on. Hooks into the iframe
+// touch forwarding below; no-ops otherwise.
+let _mom = null;
+
+function _momEnabled() {
+  return prefs.pageTurnDrag
+    && (prefs.pageTurnAnim === 'paper' || prefs.pageTurnAnim === 'momentum')
+    && !!_cxReader
+    && !_cxReader._isCbz && !_cxReader._isFixedLayout
+    && _slideCapable() && isTouchReader() && !hasOpenPanel();
+}
+
+// Shadow element set up for manual (drag-driven) opacity control.
+function _dragShadowEl(dir) {
+  const v = document.getElementById('epub-viewer');
+  if (!v) return null;
+  let sh = document.getElementById('turn-shadow');
+  if (!sh) { sh = document.createElement('div'); sh.id = 'turn-shadow'; v.appendChild(sh); }
+  sh.className = dir === 'prev' ? 'dir-prev' : 'dir-next';
+  sh.style.animation = 'none';
+  sh.style.transition = 'none';
+  sh.style.opacity = '0';
+  return sh;
+}
+
+function _momStart(x, y) {
+  _mom = null;
+  if (!_momEnabled()) return;
+  const pag  = _cxReader?._paginator;
+  const body = _cxReader?.iframe?.contentDocument?.body;
+  if (!pag || !body) return;
+  let base = 0;
+  try { base = -(new DOMMatrixReadOnly(getComputedStyle(body).transform).m41) || 0; } catch {}
+  _mom = { x0: x, y0: y, dir: null, engaged: false, body, pag,
+           base, adv: pag._spreadAdvance || body.clientWidth || 1,
+           lastX: x, lastT: performance.now(), vx: 0 };
+}
+
+function _momMove(x, y, e) {
+  const m = _mom;
+  if (!m) return false;
+  const dx = x - m.x0, dy = y - m.y0;
+  if (!m.engaged) {
+    if (Math.abs(dx) < 12 || Math.abs(dx) <= Math.abs(dy)) {
+      if (Math.abs(dy) > 16) _mom = null;          // vertical gesture — release to others
+      return false;
+    }
+    const dir = dx < 0 ? 'next' : 'prev';
+    // At a chapter edge there's no adjacent page in this iframe — let the discrete
+    // swipe handle the chapter change instead of dragging into a void.
+    if (dir === 'next' ? m.pag.isAtEnd : m.pag.isAtStart) { _mom = null; return false; }
+    m.dir = dir;
+    m.engaged = true;
+    m.body.style.transition = 'none';
+    if (prefs.pageTurnAnim === 'paper') m.sh = _dragShadowEl(dir);   // spine shadow tracks the drag
+  }
+  if (e?.cancelable) e.preventDefault();
+  const now = performance.now();
+  const dt = now - m.lastT;
+  if (dt > 0) m.vx = (x - m.lastX) / dt;            // px/ms, signed
+  m.lastX = x; m.lastT = now;
+  let off = m.base - dx;                            // drag left (next) → larger offset
+  const min = m.base - m.adv, max = m.base + m.adv; // clamp to one page either way
+  if (off < min) off = min; else if (off > max) off = max;
+  if (off < 0) off = 0;
+  m.body.style.transform = off === 0 ? '' : `translateX(-${Math.round(off)}px)`;
+  if (m.sh) m.sh.style.opacity = (0.9 * Math.min(1, Math.abs(off - m.base) / m.adv)).toFixed(3);
+  return true;
+}
+
+// Returns true if a momentum drag consumed the gesture.
+function _momEnd(x) {
+  const m = _mom;
+  if (!m) return false;
+  _mom = null;
+  if (!m.engaged) return false;                    // never engaged → let swipe/tap handle it
+  const dx = x - m.x0;
+  const fling  = Math.abs(m.vx) > 0.5 && Math.sign(m.vx) === Math.sign(dx);
+  const commit = Math.abs(dx) > m.adv * 0.3 || fling;
+  const dur = 260;
+  const ease = prefs.pageTurnAnim === 'momentum' ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.33,0,.25,1)';
+  m.body.style.transition = `transform ${dur}ms ${ease}`;
+  if (commit) {
+    sessionPageCount++;
+    pendingNavDirection = null;                    // engine slide is the visual; no host _pageEnter
+    void _cxReader[m.dir]();                        // animate from the dragged position to the target
+  } else {
+    m.body.style.transform = m.base === 0 ? '' : `translateX(-${Math.round(m.base)}px)`;
+  }
+  if (m.sh) { m.sh.style.transition = 'opacity 220ms ease'; m.sh.style.opacity = '0'; }
+  clearTimeout(_slideClrTimer);
+  _slideClrTimer = setTimeout(() => {
+    const b = _cxReader?.iframe?.contentDocument?.body;
+    if (b) b.style.transition = '';
+  }, dur + 80);
+  return true;
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+// On Android (BOOX e-ink devices) hardware page-turn buttons can fire multiple
+// events per physical press. Throttle to one navigation per 400ms on Android.
+let _lastNavTs = 0;
+function _navThrottle() {
+  if (!isAndroidApp()) return false;
+  const now = Date.now();
+  if (now - _lastNavTs < 400) return true; // suppressed
+  _lastNavTs = now;
+  return false;
+}
+function goNext() {
+  if (deferredNextPending) return;
+  if (_navThrottle()) return;
+  if (!_cxReader) return;
+  if (_useEngineSlide()) { _cxSlideTurn('next'); return; }
+  // Already on the true last page of the last chapter — CXReader.next() would silently no-op
+  // (see CXReader.next() in cxreader/index.js). Re-show the "book finished" overlay (with its
+  // own "return to library" option) instead of doing nothing, since the automatic one-time
+  // overlay from _cxRelocatedHandler may already have been dismissed by now.
+  const spineTotal = _cxReader?.spine?.length || 0;
+  const atBookEnd = currentChapTotal > 0 && currentChapPage >= currentChapTotal
+    && spineTotal > 0 && currentSpineIndex === spineTotal - 1;
+  if (atBookEnd) { showBookFinishedOverlay(); return; }
+  _pageExit('next');
+  pendingNavDirection = 'next';
+  sessionPageCount++;
+  void _cxReader.next();
+}
+function goPrev() {
+  if (_navThrottle()) return;
+  deferredNextPending = false;
+  if (!_cxReader) return;
+  if (_useEngineSlide()) { _cxSlideTurn('prev'); return; }
+  _pageExit('prev');
+  pendingNavDirection = 'prev';
+  sessionPageCount++;
+  void _cxReader.prev();
+}
+
+// ── Touch / swipe navigation ──────────────────────────────────────────────────
+const SWIPE_THRESHOLD = 24;   // min px horizontal distance
+const SWIPE_MAX_VERT  = 130;  // max vertical drift allowed
+const TAP_MAX_DRIFT   = 20;   // max px movement still counted as a tap
+const SWIPE_DOWN_OPEN = 42;   // px downward swipe to reveal header
+const SWIPE_UP_CLOSE  = 30;   // px upward swipe to hide header when open
+// iOS detection (Chrome/Safari on iPhone/iPad use WebKit with different iframe touch behaviour)
+const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) ||
+              (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+/** Phone / tablet / PWA touch device. */
+function isTouchReader() {
+  return isIOS ||
+    isAndroidApp() ||
+    navigator.maxTouchPoints > 0 ||
+    !!window.matchMedia?.('(pointer: coarse)')?.matches;
+}
+
+
+let touchStartX = 0;
+let touchStartY = 0;
+let suppressNextTap = false; // set by long-press dict lookup to prevent navigation on touchend
+let _selectSuppressNav = false; // true while a text-selection gesture is active — blocks swipe-nav preventDefault
+
+function handleTouchStart(e) {
+  touchStartX = e.changedTouches[0].clientX;
+  touchStartY = e.changedTouches[0].clientY;
+}
+
+function handleTouchEnd(e) {
+  if (suppressNextTap) { suppressNextTap = false; return; }
+  const dx    = e.changedTouches[0].clientX - touchStartX;
+  const dy    = e.changedTouches[0].clientY - touchStartY;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  const y     = e.changedTouches[0].clientY;
+  if (prefs.autoHideHeader && dy > SWIPE_DOWN_OPEN && absDx < 70) {
+    const wasHidden = !readerLayout.classList.contains('header-peek');
+    if (!readerLayout.classList.toggle('header-peek')) closeJumpPanel();
+    else if (wasHidden) _headerRevealTs = Date.now();
+    syncHeaderDismissBackdrop();
+    return;
+  }
+  if (prefs.autoHideHeader && dy < -SWIPE_UP_CLOSE && absDx < 70 && readerLayout.classList.contains('header-peek')) {
+    forceHideAutoHeader();
+    closeJumpPanel();
+    return;
+  }
+  if (absDx < TAP_MAX_DRIFT && absDy < TAP_MAX_DRIFT) {
+    const x = e.changedTouches[0].clientX;
+    const nav = inNavZone(x);
+    if (nav === 'prev') { goPrev(); return; }
+    if (nav === 'next') { goNext(); return; }
+    if (prefs.autoHideHeader && readerLayout.classList.contains('header-peek')) {
+      forceHideAutoHeader();
+      return;
+    }
+    return;
+  }
+  if (absDx > SWIPE_THRESHOLD && absDy < SWIPE_MAX_VERT) {
+    if (dx < 0) goNext();
+    else        goPrev();
+  }
+}
+// Attach to the host container — covers the area outside the iframe (nav zones etc)
+epubViewer.addEventListener('touchstart', handleTouchStart, { passive: true });
+epubViewer.addEventListener('touchend',   handleTouchEnd,   { passive: false });
+
+// Per-page: forward touch events from inside the epub iframe into our handlers
+function attachIframeTouchNav(view) {
+  const win = view?.contents?.window;
+  if (!win) return;
+  if (win.__codexaTouchNav) return;
+  win.__codexaTouchNav = true;
+  const touchTextMode = isTouchReader();
+  // No tap-to-page navigation on mobile; swipe-only navigation.
+  let iframeOffX = 0, iframeOffY = 0;
+
+  win.addEventListener('touchstart', (e) => {
+    const iframe = view.element?.querySelector('iframe') || view.element;
+    iframeOffX   = iframe ? iframe.getBoundingClientRect().left : 0;
+    iframeOffY   = iframe ? iframe.getBoundingClientRect().top  : 0;
+    touchStartX  = e.changedTouches[0].clientX + iframeOffX;
+    touchStartY  = e.changedTouches[0].clientY + iframeOffY;
+    _momStart(touchStartX, touchStartY);
+  }, { passive: false });
+
+  win.addEventListener('touchmove', (e) => {
+    // Block browser back/forward gesture for horizontal swipes, but never during text
+    // selection — preventDefault kills Android drag handles when a range is active.
+    const sel = win.getSelection?.();
+    if (_selectSuppressNav || (sel && !sel.isCollapsed)) return;
+    // Momentum finger-tracking drives the live page slide; if it engages it owns
+    // the gesture (it preventDefaults too).
+    if (_momMove(e.touches[0].clientX + iframeOffX, e.touches[0].clientY + iframeOffY, e)) return;
+    const absDx = Math.abs(e.touches[0].clientX + iframeOffX - touchStartX);
+    const absDy = Math.abs(e.touches[0].clientY + iframeOffY - touchStartY);
+    if (absDx > 8 && absDx > absDy) e.preventDefault();
+  }, { passive: false });
+
+  // Zone-click navigation from inside the iframe (desktop + any pointer type).
+  // Nav zones are pointer-events:none so clicks always reach the iframe; this
+  // handler intercepts simple clicks in the nav zone area before they land on text.
+  // A 250 ms timer lets a double-click reach the dblclick/dict handler instead
+  // of treating the first click as a navigation intent.
+  let _zoneClickTimer = null;
+  win.addEventListener('click', (e) => {
+    if (hasOpenPanel()) return;
+    const iframe = view.element?.querySelector('iframe') || view.element;
+    const offX = iframe ? iframe.getBoundingClientRect().left : 0;
+    const nav = inNavZone(e.clientX + offX);
+    // Cancel any pending navigation on ANY second click — the timer check must come
+    // before the selection check because the browser selects the word on the second
+    // mousedown of a dblclick, so sel.isCollapsed is already false when the second
+    // click fires; checking selection first would skip this branch and let the
+    // first-click timer fire, causing navigation alongside the dict lookup.
+    if (_zoneClickTimer) {
+      clearTimeout(_zoneClickTimer);
+      _zoneClickTimer = null;
+      return;
+    }
+    if (!nav) return;
+    const sel = win.getSelection?.();
+    if (sel && !sel.isCollapsed) return;   // drag-select ended — don't navigate
+    e.preventDefault();
+    _zoneClickTimer = setTimeout(() => {
+      _zoneClickTimer = null;
+      if (nav === 'prev') goPrev(); else goNext();
+      if (prefs.autoHideHeader && readerLayout.classList.contains('header-peek')) forceHideAutoHeader();
+    }, 250);
+  });
+
+  win.addEventListener('touchend', (e) => {
+    if (suppressNextTap) {
+      suppressNextTap = false;
+      // Do not preventDefault — that cancels Android selection handles / toolbar.
+      return;
+    }
+    // A live momentum drag owns the gesture — commit/snap and consume it here.
+    if (_momEnd(e.changedTouches[0].clientX + iframeOffX)) { if (e.cancelable) e.preventDefault(); return; }
+    const cx     = e.changedTouches[0].clientX + iframeOffX;
+    const cy     = e.changedTouches[0].clientY + iframeOffY;
+    const dx     = cx - touchStartX;
+    const dy     = cy - touchStartY;
+    const absDx  = Math.abs(dx);
+    const absDy  = Math.abs(dy);
+    if (prefs.autoHideHeader && dy > SWIPE_DOWN_OPEN && absDx < 70) {
+      if (e.cancelable) e.preventDefault();
+      const wasHidden = !readerLayout.classList.contains('header-peek');
+      if (!readerLayout.classList.toggle('header-peek')) closeJumpPanel();
+      else if (wasHidden) _headerRevealTs = Date.now();
+      syncHeaderDismissBackdrop();
+      return;
+    }
+    if (prefs.autoHideHeader && dy < -SWIPE_UP_CLOSE && absDx < 70 && readerLayout.classList.contains('header-peek')) {
+      if (e.cancelable) e.preventDefault();
+      forceHideAutoHeader();
+      closeJumpPanel();
+      return;
+    }
+    if (absDx < TAP_MAX_DRIFT && absDy < TAP_MAX_DRIFT) {
+      // Footnote links take priority over navigation hot zones — let the click fire
+      if (e.changedTouches[0].target?.closest?.('a[data-footnote-href]')) return;
+      const nav = inNavZone(cx);
+      if (nav) {
+        if (e.cancelable) e.preventDefault();
+        if (nav === 'prev') goPrev(); else goNext();
+        if (prefs.autoHideHeader && readerLayout.classList.contains('header-peek')) forceHideAutoHeader();
+        return;
+      }
+      // Vertical tap zones (one-handed navigation) — only when no overlay is open
+      if (prefs.vertNavZones) {
+        const anyOverlay = hasOpenPanel()
+          || document.getElementById('annot-toolbar')?.classList.contains('open')
+          || document.getElementById('sleep-timer-panel')?.classList.contains('open')
+          || document.getElementById('footnote-popup')?.classList.contains('open');
+        if (!anyOverlay && !e.changedTouches[0].target?.closest?.('a')) {
+          const sel = win.getSelection?.();
+          if (!sel || sel.isCollapsed) {
+            const isTop = cy < window.innerHeight / 2;
+            const goBack = prefs.vertNavZonesReversed ? !isTop : isTop;
+            if (e.cancelable) e.preventDefault();
+            if (goBack) goPrev(); else goNext();
+            if (prefs.autoHideHeader && readerLayout.classList.contains('header-peek')) forceHideAutoHeader();
+            return;
+          }
+        }
+      }
+      if (prefs.autoHideHeader && readerLayout.classList.contains('header-peek')) {
+        if (e.cancelable) e.preventDefault();
+        forceHideAutoHeader();
+      }
+      return;
+    }
+    if (absDx > SWIPE_THRESHOLD && absDy < SWIPE_MAX_VERT) {
+      if (e.cancelable) e.preventDefault();
+      if (dx < 0) goNext();
+      else        goPrev();
+    }
+  }, { passive: false });
+}
+
+document.addEventListener('keydown', (e) => {
+  const key = String(e.key || '').toLowerCase();
+  // ESC should always close an open panel, even when focus is inside an input.
+  if (key === 'escape') {
+    e.preventDefault();
+    if (hasOpenPanel()) {
+      closePanels();
+    } else {
+      void returnToLibrary();
+    }
+    return;
+  }
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  switch (e.key) {
+    case 'ArrowRight': case ' ': case 'PageDown':
+      e.preventDefault(); goNext(); break;
+    case 'ArrowLeft': case 'PageUp':
+      e.preventDefault(); goPrev(); break;
+    default:
+      break;
+  }
+  switch (key) {
+    case 'k':
+      e.preventDefault();
+      openToc();
+      break;
+    case 'i':
+      e.preventDefault();
+      openSearch();
+      break;
+    case 's':
+      e.preventDefault();
+      openSettings();
+      break;
+    case 'f':
+      e.preventDefault();
+      void toggleFullscreen();
+      break;
+    default:
+      break;
+  }
+});
+
+// ── App detection ─────────────────────────────────────────────────────────────
+function isAndroidApp() {
+  return navigator.userAgent.includes('CodexaApp');
+}
+
+// Running inside a Capacitor-wrapped WKWebView (iOS native app).
+// window.Capacitor is injected by the Capacitor bridge into every page the WKWebView loads.
+function isIOSApp() {
+  return !!(window.Capacitor?.isNativePlatform?.() && window.Capacitor?.getPlatform?.() === 'ios');
+}
+
+// Enable/disable hardware volume-key page navigation via the Android JS bridge.
+function applyVolumeKeyMode(enabled) {
+  if (enabled) {
+    window.__codexaVolumeKey = function(dir) {
+      if (!isReady) return;
+      const swap = prefs.volumeKeysSwapped;
+      if ((dir === 'down' && !swap) || (dir === 'up' && swap)) goNext();
+      else goPrev();
+    };
+  } else {
+    delete window.__codexaVolumeKey;
+  }
+  if (window.AndroidCodexa?.setVolumeKeyMode) {
+    window.AndroidCodexa.setVolumeKeyMode(enabled);
+  }
+}
+
+// iOS volume key events dispatched by native MainViewController via evaluateJavaScript.
+// Always attached; the pref check happens at event time so toggling the setting
+// takes effect without reloading the page.
+window.addEventListener('volumeUp', () => {
+  if (!isReady || !prefs.volumeKeysEnabled) return;
+  if (prefs.volumeKeysSwapped) goPrev(); else goNext();
+});
+window.addEventListener('volumeDown', () => {
+  if (!isReady || !prefs.volumeKeysEnabled) return;
+  if (prefs.volumeKeysSwapped) goNext(); else goPrev();
+});
+
+// Lock/unlock device orientation to portrait.
+// Works on Android app (via JS bridge) and PWA (via Screen Orientation API).
+async function applyPortraitLock(enabled) {
+  if (isAndroidApp() && window.AndroidCodexa?.setPortraitLock) {
+    window.AndroidCodexa.setPortraitLock(enabled);
+    return;
+  }
+  try {
+    if (enabled) {
+      await screen.orientation?.lock?.('portrait');
+    } else {
+      screen.orientation?.unlock?.();
+    }
+  } catch { /* Not available in regular browser or not in fullscreen */ }
+}
+
+// ── Mouse wheel navigation ────────────────────────────────────────────────────
+let wheelCooldown = false;
+function handleWheel(deltaY) {
+  if (!prefs.mouseWheelNav || !isReady) return;
+  if (wheelCooldown) return;
+  wheelCooldown = true;
+  setTimeout(() => { wheelCooldown = false; }, 400);
+  if (deltaY > 0) goNext(); else goPrev();
+}
+epubViewer.addEventListener('wheel', (e) => { handleWheel(e.deltaY); }, { passive: true });
+document.addEventListener('br-wheel', (e) => { handleWheel(e.detail.deltaY); });
+
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+window.addEventListener('resize', debounce(() => {
+  applyHeaderButtonSize();
+  // When running inside the Android app, system bars are always hidden in reader.
+  // Update layout vars here since this resize fires right after bars hide/show.
+  if (isAndroidApp()) {
+    const r = document.documentElement;
+    r.style.setProperty('--sat', '0px');
+    r.style.setProperty('--sab', '0px');
+    r.style.setProperty('--layout-h', window.innerHeight + 'px');
+  }
+  // CXReader re-evaluates column mode and re-paginates directly.
+  if (_cxReader) _cxSyncLayout();
+}, 300));
+
+// ── Reading statistics ────────────────────────────────────────────────────────
+async function startStatsSession(bookId) {
+  try {
+    const res = await apiFetch('/stats/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id: bookId, start_ts: Math.floor(Date.now() / 1000) }),
+    });
+    statsSessionId = res?.id || null;
+    sessionPageCount = 0;
+    sessionStartPct = currentPct > 0 ? currentPct : null;
+    log('[stats] session started id:', statsSessionId);
+  } catch (e) {
+    warn('[stats] failed to start session:', e.message);
+  }
+}
+
+function endStatsSessionBackground() {
+  if (!statsSessionId) return;
+  const id  = statsSessionId;
+  const pgs = sessionPageCount;
+  const startPct = sessionStartPct;
+  const pct = currentPct > 0 ? currentPct : null;
+  statsSessionId   = null;
+  sessionPageCount = 0;
+  sessionStartPct  = null;
+  const token = getToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+  fetch(`/api/stats/session/${id}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ end_ts: Math.floor(Date.now() / 1000), pages_nav: pgs, end_pct: pct, start_pct: startPct }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+async function endStatsSession() {
+  if (!statsSessionId) return;
+  const id  = statsSessionId;
+  const pgs = sessionPageCount;
+  const startPct = sessionStartPct;
+  const pct = currentPct > 0 ? currentPct : null;
+  statsSessionId   = null;
+  sessionPageCount = 0;
+  sessionStartPct  = null;
+  try {
+    await apiFetch(`/stats/session/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ end_ts: Math.floor(Date.now() / 1000), pages_nav: pgs, end_pct: pct, start_pct: startPct }),
+    });
+  } catch (e) {
+    warn('[stats] failed to end session:', e.message);
+  }
+}
+
+// Finalizes the current reading_sessions row and immediately opens a new one — a "checkpoint" so
+// a long session isn't entirely lost (for both Codexa's own stats and BookOrbit's reading log,
+// which only ever sees a session once it has an end_ts — see uploadSessions() in
+// bookorbitSync.js) if the app never gets a chance to close cleanly afterward: a killed tab, an
+// e-reader cover closing and cutting wifi, or a crash. Called both automatically (page hidden)
+// and from the manual KOSync push actions.
+// `background`: use the keepalive-fetch finalize (endStatsSessionBackground) instead of the
+// normal awaited PATCH — for the visibilitychange→hidden case, where the page may vanish before
+// a regular fetch completes. Starting the new session is always a best-effort, non-keepalive
+// call either way: if the page really is closing, it simply won't finish, which just means
+// tracking resumes at the next successful checkpoint (or the visibilitychange→visible handler
+// below) instead of right now — same failure mode as not rotating at all, no worse.
+function rotateStatsSession({ background = false } = {}) {
+  if (!currentBook || !statsSessionId) return;
+  if (background) endStatsSessionBackground();
+  else endStatsSession().catch(() => {});
+  startStatsSession(currentBook.id);
+}
+
+function logChapterVisit(bookId, href, title) {
+  if (!bookId || !href) return;
+  apiFetch('/stats/chapter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book_id: bookId, chapter_href: href, chapter_title: title || '' }),
+  }).catch(() => {});
+}
+
+// ── Offline queues (bookmarks + annotations) ──────────────────────────────────
+
+function enqueueOfflineOp(queueKey, op, data) {
+  try {
+    const q = JSON.parse(localStorage.getItem(queueKey) || '[]');
+    q.push({ op, data, ts: Date.now() });
+    localStorage.setItem(queueKey, JSON.stringify(q));
+  } catch { /* ignore */ }
+}
+
+async function syncOfflineBookmarks(bookId) {
+  const key = `br_bm_q_${bookId}`;
+  try {
+    const q = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!q.length) return;
+    for (const item of q) {
+      if (item.op === 'create') await apiFetch(`/bookmarks/${bookId}`, { method: 'POST', body: JSON.stringify(item.data) }).catch(() => {});
+      if (item.op === 'delete') await apiFetch(`/bookmarks/${bookId}/${item.data.id}`, { method: 'DELETE' }).catch(() => {});
+    }
+    localStorage.removeItem(key);
+    bookmarksCache = await apiFetch(`/bookmarks/${bookId}`).catch(() => bookmarksCache);
+    try { localStorage.setItem(`br_bm_${bookId}`, JSON.stringify(bookmarksCache)); } catch { /* ignore */ }
+    renderBookmarkList();
+    updateBookmarkBadge();
+  } catch { /* ignore */ }
+}
+
+async function syncOfflineAnnotations(bookId) {
+  const key = `br_ann_q_${bookId}`;
+  try {
+    const q = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!q.length) return;
+    for (const item of q) {
+      if (item.op === 'create') await apiFetch(`/annotations/${bookId}`, { method: 'POST', body: JSON.stringify(item.data) }).catch(() => {});
+      if (item.op === 'delete') await apiFetch(`/annotations/${bookId}/${item.data.id}`, { method: 'DELETE' }).catch(() => {});
+      if (item.op === 'update') await apiFetch(`/annotations/${bookId}/${item.data.id}`, { method: 'PUT', body: JSON.stringify(item.data.updates) }).catch(() => {});
+    }
+    localStorage.removeItem(key);
+    annotationsCache = await apiFetch(`/annotations/${bookId}`).catch(() => annotationsCache);
+    try { localStorage.setItem(`br_ann_${bookId}`, JSON.stringify(annotationsCache)); } catch { /* ignore */ }
+    reapplyAnnotations();
+    renderAnnotationList();
+  } catch { /* ignore */ }
+}
+
+// ── Bookmarks ─────────────────────────────────────────────────────────────────
+function updateBookmarkBadge() {
+  const n = bookmarksCache.length;
+  bookmarksBadge.textContent = n > 9 ? '9+' : String(n);
+  bookmarksBadge.classList.toggle('hidden', n === 0 || !prefs.bookmarkBadge);
+}
+
+function updateAnnotationBadge() {
+  if (!annotationsBadge) return;
+  const n = annotationsCache.length;
+  annotationsBadge.textContent = n > 9 ? '9+' : String(n);
+  annotationsBadge.classList.toggle('hidden', n === 0 || !prefs.annotationBadge);
+}
+
+function renderBookmarkList() {
+  if (!bookmarksCache.length) {
+    bookmarksListEl.innerHTML = `<div class="bookmarks-empty">${t('reader.bookmarks_empty')}</div>`;
+    return;
+  }
+  bookmarksListEl.innerHTML = '';
+  bookmarksCache.forEach(bm => {
+    const item = document.createElement('div');
+    item.className = 'bookmark-item';
+    item.dataset.id = String(bm.id);
+
+    const pctText = `${Math.round(bm.pct * 100)}%`;
+    const dateText = bm.created_at
+      ? new Date(bm.created_at * 1000).toLocaleDateString()
+      : '';
+
+    item.innerHTML = `
+      <div class="bookmark-info">
+        <span class="bookmark-label">${escapeHtml(bm.label || pctText)}</span>
+        <span class="bookmark-meta">${escapeHtml(pctText)}${dateText ? ' · ' + escapeHtml(dateText) : ''}</span>
+      </div>
+      <div class="bookmark-actions">
+        <button class="bookmark-action-btn edit" title="${t('reader.bookmark_edit')}">✎</button>
+        <button class="bookmark-action-btn delete" title="${t('reader.bookmark_delete')}">×</button>
+      </div>`;
+
+    // Click on info → jump (save position so user can go back / accept)
+    item.querySelector('.bookmark-info').addEventListener('click', () => {
+      if (!bm.cfi) return;
+      // Clear any existing bookmark/annotation back+accept buttons first — clicking a new
+      // jump item implicitly accepts the previous position, so only one pair shows at a time.
+      _clearNavPreJumps();
+      if (currentCfi) {
+        preBookmarkCfi = currentCfi;
+        bookmarkBackBtn.style.display   = '';
+        bookmarkAcceptBtn.style.display = '';
+      }
+      closePanels();
+      navigateToCfi(bm.cfi);
+    });
+
+    // Edit label
+    item.querySelector('.bookmark-action-btn.edit').addEventListener('click', () => {
+      const labelEl = item.querySelector('.bookmark-label');
+      const current = labelEl.textContent;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'bookmark-label-input';
+      input.value = current;
+      labelEl.replaceWith(input);
+      input.focus();
+      const save = async () => {
+        const newLabel = input.value.trim() || pctText;
+        try {
+          await apiFetch(`/bookmarks/${currentBook.id}/${bm.id}`, {
+            method: 'PUT',
+            body: JSON.stringify({ label: newLabel }),
+          });
+          bm.label = newLabel;
+        } catch { /* revert silently */ }
+        renderBookmarkList();
+      };
+      input.addEventListener('blur', save);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        if (e.key === 'Escape') { input.value = current; input.blur(); }
+      });
+    });
+
+    // Delete
+    item.querySelector('.bookmark-action-btn.delete').addEventListener('click', async () => {
+      try {
+        await apiFetch(`/bookmarks/${currentBook.id}/${bm.id}`, { method: 'DELETE' });
+      } catch {
+        if (bm.id > 0) enqueueOfflineOp(`br_bm_q_${currentBook.id}`, 'delete', { id: bm.id });
+      }
+      bookmarksCache = bookmarksCache.filter(b => b.id !== bm.id);
+      try { localStorage.setItem(`br_bm_${currentBook.id}`, JSON.stringify(bookmarksCache)); } catch { /* ignore */ }
+      renderBookmarkList();
+      updateBookmarkBadge();
+      toast.success(t('reader.bookmark_deleted'));
+    });
+
+    bookmarksListEl.appendChild(item);
+  });
+}
+
+async function loadBookmarks(bookId) {
+  try {
+    bookmarksCache = await apiFetch(`/bookmarks/${bookId}`);
+    try { localStorage.setItem(`br_bm_${bookId}`, JSON.stringify(bookmarksCache)); } catch { /* ignore */ }
+  } catch {
+    try { bookmarksCache = JSON.parse(localStorage.getItem(`br_bm_${bookId}`) || '[]'); } catch { bookmarksCache = []; }
+  }
+  renderBookmarkList();
+  updateBookmarkBadge();
+}
+
+async function addBookmark() {
+  if (!currentBook || !_cxReader) return;
+  const cfi   = currentCfi;
+  const pct   = currentPct;
+  const chapter = chapterTitleEl.textContent || '';
+  const label = `${chapter ? chapter + ' · ' : ''}${Math.round(pct * 100)}%`;
+
+  const payload = { cfi, pct, label };
+  try {
+    const bm = await apiFetch(`/bookmarks/${currentBook.id}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    bookmarksCache.push(bm);
+  } catch {
+    bookmarksCache.push({ id: -(Date.now()), ...payload, offline: true });
+    enqueueOfflineOp(`br_bm_q_${currentBook.id}`, 'create', payload);
+  }
+  bookmarksCache.sort((a, b) => a.pct - b.pct);
+  try { localStorage.setItem(`br_bm_${currentBook.id}`, JSON.stringify(bookmarksCache)); } catch { /* ignore */ }
+  renderBookmarkList();
+  updateBookmarkBadge();
+  toast.success(t('reader.bookmark_added'));
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ── Header button fitting ─────────────────────────────────────────────────────
+// Dynamically shrinks header buttons so all of them always fit on narrow screens.
+// Recalculates --reader-header-btn-size and --reader-header-icon-size on the
+// header element whenever its width changes or a button is shown/hidden.
+// On Chrome 83 WebView, initHeaderFit() is called explicitly inside init() after
+// startRendition() so no observers are active while critical fetch() calls are in flight.
+function initHeaderFit() {
+  const header = document.querySelector('.reader-header');
+  if (!header) return;
+
+  function fit() {
+    // Use the user's preferred button size as the ceiling so the icon size slider
+    // actually affects icons — without this, MAX was hardcoded to 36 and would
+    // override whatever applyHeaderButtonSize() set on the root element.
+    const userPx = Math.round(getHeaderButtonBasePx() * (prefs.headerButtonScalePct ?? 100) / 100);
+    const MAX = Math.max(userPx, 22), MIN = 22;
+    const btns = [...header.querySelectorAll('.btn-icon')]
+      .filter(b => getComputedStyle(b).display !== 'none');
+    const n = btns.length;
+    if (!n) return;
+    const cs  = getComputedStyle(header);
+    const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const gap = parseFloat(cs.gap) || 0;
+    const available = header.clientWidth - pad - gap * (n - 1) - 44; // 44px kept for title
+    const size = Math.max(MIN, Math.min(MAX, Math.floor(available / n)));
+    const btnPx  = size + 'px';
+    const iconPx = Math.round(size * 0.56) + 'px';
+    // Only write to style when values change — prevents MutationObserver feedback loop
+    // on Chrome 83 Android WebView where setProperty always fires the observer even for
+    // the same value, starving the event loop and blocking pending fetch() Promises.
+    if (header.style.getPropertyValue('--reader-header-btn-size')  !== btnPx)
+      header.style.setProperty('--reader-header-btn-size',  btnPx);
+    if (header.style.getPropertyValue('--reader-header-icon-size') !== iconPx)
+      header.style.setProperty('--reader-header-icon-size', iconPx);
+  }
+
+  fit();
+  new ResizeObserver(fit).observe(header);
+  // Re-fit when any button's inline style changes (e.g. back/accept buttons toggled).
+  // Skip on Chrome 83 WebView — even with the guard above, MutationObserver + fetch()
+  // interact badly on this WebView's event loop; ResizeObserver alone is sufficient.
+  if (!_isLegacyWv) {
+    new MutationObserver(fit).observe(header, { attributes: true, subtree: true, attributeFilter: ['style'] });
+  }
+}
+
+if (!_isLegacyWv) initHeaderFit();
+
+// ── Button wiring ─────────────────────────────────────────────────────────────
+
+// Annotation toolbar
+onTap(document.getElementById('annot-backdrop'), closeAnnotationUI);
+document.getElementById('annot-btn-cancel')?.addEventListener('click', () => closeAnnotationToolbar());
+document.querySelectorAll('.annot-color-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const color = btn.dataset.color;
+    if (!color || !_pendingAnnotation) return;
+    const { cfiRange, text } = _pendingAnnotation;
+    closeAnnotationToolbar();
+    await createAnnotation(cfiRange, text, color, '');
+  });
+});
+document.getElementById('annot-btn-note')?.addEventListener('click', () => {
+  if (!_pendingAnnotation) return;
+  const pending = _pendingAnnotation;
+  closeAnnotationToolbar(true); // keep press highlight visible while note editor is open
+  _pendingAnnotation = pending; // restore after close nulled it
+  showAnnotationNoteEditor(null, '');
+});
+
+// Annotation note editor (creation mode)
+document.getElementById('annot-note-cancel')?.addEventListener('click', closeAnnotationNoteEditor);
+document.getElementById('annot-note-save')?.addEventListener('click', async () => {
+  const note = (document.getElementById('annot-note-text')?.value || '').trim();
+  if (_editingAnnotationId !== null) {
+    await updateAnnotation(_editingAnnotationId, { note, color: _pendingNoteColor });
+    closeAnnotationNoteEditor();
+  } else if (_pendingAnnotation) {
+    const { cfiRange, text } = _pendingAnnotation;
+    closeAnnotationNoteEditor();
+    await createAnnotation(cfiRange, text, _pendingNoteColor, note);
+  }
+});
+
+// Annotation edit sheet (for existing annotations)
+document.getElementById('annot-edit-close')?.addEventListener('click', closeAnnotationEditSheet);
+document.getElementById('annot-edit-note-btn')?.addEventListener('click', () => {
+  const id = parseInt(document.getElementById('annot-edit-sheet')?.dataset.annotId);
+  const a  = annotationsCache.find(x => x.id === id);
+  if (!a) return;
+  closeAnnotationEditSheet();
+  showAnnotationNoteEditor(id, a.note || '', a.color || 'yellow');
+});
+document.getElementById('annot-edit-delete-btn')?.addEventListener('click', async () => {
+  const id = parseInt(document.getElementById('annot-edit-sheet')?.dataset.annotId);
+  closeAnnotationEditSheet();
+  await deleteAnnotation(id);
+});
+document.querySelectorAll('.annot-edit-color-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const color = btn.dataset.color;
+    const sheet = document.getElementById('annot-edit-sheet');
+    const id = parseInt(sheet?.dataset.annotId);
+    if (!color || !id) return;
+    sheet.querySelectorAll('.annot-edit-color-btn').forEach(b => b.classList.toggle('active', b === btn));
+    await updateAnnotation(id, { color });
+  });
+});
+
+// Dictionary button inside annotation toolbar
+document.getElementById('annot-btn-dict')?.addEventListener('click', () => {
+  const text = _pendingAnnotation?.text || '';
+  const word = text.split(/\s+/)[0].replace(/^[''-]+|[''-]+$/g, '').trim();
+  closeAnnotationToolbar(true); // keep press highlight visible while dict popup is open
+  if (word) showDictPopup(word);
+});
+
+// Copy selection to clipboard
+document.getElementById('annot-btn-copy')?.addEventListener('click', async () => {
+  const text = _pendingAnnotation?.text || '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast.success(t('reader.annotation_copied'));
+  } catch {
+    toast.error(t('reader.annotation_copy_failed'));
+  }
+  closeAnnotationToolbar();
+});
+
+// Search selection in book
+document.getElementById('annot-btn-search-book')?.addEventListener('click', () => {
+  const text = (_pendingAnnotation?.text || '').trim();
+  closeAnnotationToolbar();
+  openSearch();
+  if (text && searchInput) {
+    searchInput.value = text;
+    searchSubmitBtn?.click();
+  }
+});
+
+// Note editor color swatches
+document.querySelectorAll('.annot-note-color-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _pendingNoteColor = btn.dataset.color;
+    document.querySelectorAll('.annot-note-color-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.color === _pendingNoteColor));
+  });
+});
+
+// Sleep timer button
+document.getElementById('btn-sleep-timer')?.addEventListener('click', () => {
+  const panel = document.getElementById('sleep-timer-panel');
+  if (panel?.classList.contains('open')) { closeSleepTimerPanel(); return; }
+  openSleepTimerPanel();
+});
+onTap(document.getElementById('sleep-timer-backdrop'), closeSleepTimerPanel);
+document.querySelectorAll('.sleep-preset-btn').forEach(btn => {
+  btn.addEventListener('click', () => startSleepTimer(parseInt(btn.dataset.minutes, 10)));
+});
+document.getElementById('sleep-timer-cancel-btn')?.addEventListener('click', () => {
+  cancelSleepTimer();
+  closeSleepTimerPanel();
+});
+
+// Annotations sidebar
+document.getElementById('btn-annotations')?.addEventListener('click', () =>
+  document.getElementById('annotations-sidebar')?.classList.contains('open') ? closePanels() : openAnnotations());
+document.getElementById('annotations-close')?.addEventListener('click', closePanels);
+
+document.getElementById('btn-back').addEventListener('click', () => { void returnToLibrary(); });
+
+// ── KOSync hot zones ──────────────────────────────────────────────────────────
+function kosyncConfirm(action) {
+  return new Promise(resolve => {
+    const msg   = action === 'pull' ? t('reader.kosync_confirm_pull') : t('reader.kosync_confirm_push');
+    const label = t('common.confirm');
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" style="max-width:340px">
+        <p style="margin-bottom:1.5rem">${msg}</p>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="kc-cancel">${t('common.cancel')}</button>
+          <button class="btn btn-primary"   id="kc-confirm">${label}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const close = ok => { backdrop.remove(); resolve(ok); };
+    backdrop.querySelector('#kc-cancel').addEventListener('click',  () => close(false));
+    backdrop.querySelector('#kc-confirm').addEventListener('click', () => close(true));
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(false); });
+  });
+}
+
+document.getElementById('kosync-zone-bl')?.addEventListener('click', async () => {
+  if (!currentBook) return;
+  if (!await kosyncConfirm('pull')) return;
+
+  const docKey = externalDocKey();
+  const [extResult, intResult] = await Promise.allSettled([
+    apiFetch(`/kosync/remote/${encodeURIComponent(docKey)}`),
+    apiFetch(`/kosync/internal/${encodeURIComponent(docKey)}`),
+  ]);
+
+  if (extResult.status === 'rejected' && intResult.status === 'rejected') {
+    toast.error(t('reader.kosync_fetch_error'));
+    return;
+  }
+
+  const ext = extResult.status === 'fulfilled' ? extResult.value : null;
+  const int = intResult.status === 'fulfilled' ? intResult.value : null;
+  let best = null;
+  if (ext?.progress) best = ext;
+  if (int?.progress && (!best || (int.timestamp || 0) > (best.timestamp || 0))) best = int;
+
+  if (!best?.progress) { toast.info(t('reader.kosync_no_progress')); return; }
+
+  if (Math.abs((best.percentage || 0) - currentPct) <= 0.01) {
+    toast.info(t('reader.kosync_same_position'));
+    return;
+  }
+
+  const doSync = await showSyncDialog(best, currentPct, null);
+  if (!doSync) return;
+
+  if (_cxReader && best.percentage != null) {
+    await _cxReader.goToPct(best.percentage);
+    _cxReader.seekToPercent(best.percentage);
+  }
+});
+
+document.getElementById('kosync-zone-br')?.addEventListener('click', async () => {
+  if (!currentBook || !isReady) return;
+  if (!await kosyncConfirm('push')) return;
+
+  const docKey   = externalDocKey();
+  const xpointer = koReaderXPointer();
+  const [remResult, intResult] = await Promise.allSettled([
+    apiFetch(`/kosync/remote/${encodeURIComponent(docKey)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ document: docKey, progress: xpointer, percentage: currentPct, device: 'Codexa', device_id: 'codexa-web' }),
+    }),
+    apiFetch(`/kosync/internal/${encodeURIComponent(docKey)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ progress: xpointer, percentage: currentPct, device: 'Codexa', device_id: 'codexa-web' }),
+    }),
+  ]);
+
+  if (remResult.status === 'rejected' && intResult.status === 'rejected') {
+    toast.error(t('reader.kosync_push_error'));
+  } else {
+    toast.success(t('reader.kosync_push_done', { pct: Math.round(currentPct * 100) }));
+    checkBookorbitStatus({ always: true });
+    // Checkpoint the reading session here too — a manual push is a natural "I'm about to put
+    // this down" moment, same rationale as the automatic rotation on visibilitychange→hidden.
+    rotateStatsSession();
+  }
+});
+document.getElementById('btn-toc').addEventListener('click', () =>
+  tocSidebar.classList.contains('open') ? closePanels() : openToc());
+document.getElementById('btn-bookmarks').addEventListener('click', () =>
+  bookmarksSidebar.classList.contains('open') ? closePanels() : openBookmarks());
+document.getElementById('bookmarks-close').addEventListener('click', closePanels);
+document.getElementById('btn-add-bookmark').addEventListener('click', () => { void addBookmark(); });
+document.getElementById('btn-search').addEventListener('click', () =>
+  searchSidebar.classList.contains('open') ? closePanels() : openSearch());
+document.getElementById('btn-search-back').addEventListener('click', async () => {
+  if (!preSearchCfi) return;
+  clearSearchHighlights();
+  const cfi = preSearchCfi;
+  preSearchCfi = null;
+  searchBackBtn.style.display   = 'none';
+  searchAcceptBtn.style.display = 'none';
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  if (_cxReader) await _cxReader.goToCfi(cfi);
+});
+document.getElementById('btn-search-accept').addEventListener('click', () => {
+  clearSearchHighlights();
+  preSearchCfi = null;
+  searchBackBtn.style.display   = 'none';
+  searchAcceptBtn.style.display = 'none';
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+});
+// Bookmark navigation back/accept — same pattern as search
+document.getElementById('btn-bookmark-back').addEventListener('click', async () => {
+  if (!preBookmarkCfi) return;
+  const cfi = preBookmarkCfi;
+  preBookmarkCfi = null;
+  bookmarkBackBtn.style.display   = 'none';
+  bookmarkAcceptBtn.style.display = 'none';
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  if (_cxReader) await _cxReader.goToCfi(cfi);
+});
+document.getElementById('btn-bookmark-accept').addEventListener('click', () => {
+  preBookmarkCfi = null;
+  bookmarkBackBtn.style.display   = 'none';
+  bookmarkAcceptBtn.style.display = 'none';
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  // Now that the user accepted the position, push progress normally
+  void saveProgress({ forceRemote: true });
+});
+document.getElementById('btn-annotation-back').addEventListener('click', async () => {
+  if (!preAnnotationCfi) return;
+  const cfi = preAnnotationCfi;
+  preAnnotationCfi = null;
+  annotationBackBtn.style.display   = 'none';
+  annotationAcceptBtn.style.display = 'none';
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  if (_cxReader) await _cxReader.goToCfi(cfi);
+});
+document.getElementById('btn-annotation-accept').addEventListener('click', () => {
+  preAnnotationCfi = null;
+  annotationBackBtn.style.display   = 'none';
+  annotationAcceptBtn.style.display = 'none';
+  if (prefs.autoHideHeader) forceHideAutoHeader();
+  void saveProgress({ forceRemote: true });
+});
+// Manual sync button — always force-pushes the current position.
+// If the current position is behind the last known high-water mark, asks for confirmation
+// (so accidental forward jumps can be corrected) before overwriting.
+document.getElementById('btn-sync')?.addEventListener('click', async () => {
+  const btn = document.getElementById('btn-sync');
+  if (!isReady || !currentBook || btn.disabled) return;
+  const pct = currentPct > 0 ? currentPct : lastKnownGoodPct;
+  const isBackwards = pct > 0 && pct < bestKnownRemotePct - 0.005;
+  if (isBackwards) {
+    const curPctStr  = Math.round(pct * 100) + '%';
+    const bestPctStr = Math.round(bestKnownRemotePct * 100) + '%';
+    const ok = await new Promise(resolve => {
+      const bd = document.createElement('div');
+      bd.className = 'modal-backdrop';
+      bd.innerHTML = `
+        <div class="modal" role="dialog" aria-modal="true" style="max-width:420px">
+          <h3 style="margin:0 0 .75rem;font-size:1rem;font-weight:600">${t('reader.sync_back_title')}</h3>
+          <p style="margin:0 0 1.5rem;font-size:.85rem;line-height:1.5">
+            ${t('reader.sync_back_body', { cur: curPctStr, best: bestPctStr })}
+          </p>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="sync-back-cancel">${t('reader.sync_back_cancel')}</button>
+            <button class="btn btn-primary"   id="sync-back-ok">${t('reader.sync_back_confirm', { cur: curPctStr })}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(bd);
+      const close = v => { bd.remove(); resolve(v); };
+      bd.querySelector('#sync-back-ok').addEventListener('click',     () => close(true));
+      bd.querySelector('#sync-back-cancel').addEventListener('click', () => close(false));
+      bd.addEventListener('click', e => { if (e.target === bd) close(false); });
+    });
+    if (!ok) return;
+    // User confirmed — reset the high-water mark to the current position
+    bestKnownRemotePct = pct;
+  }
+  btn.classList.add('btn-sync-busy');
+  btn.disabled = true;
+  try {
+    await saveProgress({ forceRemote: true, inSession: true, forced: true });
+    cancelDebouncedSync();
+    // Checkpoint the reading session here too — same rationale as the corner-tap push and the
+    // automatic rotation on visibilitychange→hidden (see rotateStatsSession).
+    rotateStatsSession();
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('btn-sync-busy');
+    btn.classList.add('btn-sync-done');
+    setTimeout(() => btn.classList.remove('btn-sync-done'), 1500);
+  }
+});
+
+document.getElementById('btn-jump-pct').addEventListener('click', () => {
+  if (isJumpPanelOpen()) closeJumpPanel();
+  else openJumpPanel();
+});
+
+function syncJumpPctInputFromSlider() {
+  if (document.activeElement === jumpPctValue) return;
+  jumpPctValue.value = String(Math.round(parseInt(jumpPctSlider.value, 10) || 0));
+}
+
+function parseJumpPctInput() {
+  const raw = String(jumpPctValue?.value || '').replace(/%/g, '').trim();
+  return Math.min(100, Math.max(0, parseInt(raw, 10) || 0));
+}
+
+async function commitJumpPctInput({ seek = true } = {}) {
+  const n = parseJumpPctInput();
+  jumpPctSlider.value = String(n);
+  jumpPctValue.value = String(n);
+  if (seek) await seekToPercentage(n / 100);
+}
+
+jumpPctSlider.addEventListener('input', syncJumpPctInputFromSlider);
+jumpPctSlider.addEventListener('change', () => { void commitJumpPctInput(); });
+jumpPctValue?.addEventListener('focus', () => jumpPctValue.select());
+jumpPctValue?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    void commitJumpPctInput().then(() => jumpPctValue.blur());
+  } else if (e.key === 'Escape') {
+    syncJumpPctInputFromSlider();
+    jumpPctValue.blur();
+  }
+});
+jumpPctValue?.addEventListener('blur', () => { void commitJumpPctInput(); });
+
+jumpPctBackdrop?.addEventListener('click', closeJumpPanel);
+jumpPctBackdrop?.addEventListener('touchend', (e) => { e.preventDefault(); closeJumpPanel(); }, { passive: false });
+document.getElementById('search-close').addEventListener('click', closePanels);
+document.getElementById('search-submit').addEventListener('click', () => {
+  const q = searchInput.value.trim();
+  if (q.length >= 2) runSearch(q);
+});
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const q = searchInput.value.trim();
+    if (q.length >= 2) runSearch(q);
+  }
+});
+document.getElementById('btn-settings').addEventListener('click', () =>
+  settingsPanel.classList.contains('open') ? closePanels() : openSettings());
+document.getElementById('btn-fullscreen').addEventListener('click', () => { void toggleFullscreen(); });
+document.getElementById('toc-close').addEventListener('click',      closePanels);
+document.getElementById('settings-close').addEventListener('click', closePanels);
+settingsPanel.querySelector('.settings-tabs-bar').addEventListener('click', e => {
+  const btn = e.target.closest('.settings-tab-btn');
+  if (btn) activateSettingsTab(btn.dataset.tab);
+});
+onTap(panelBackdrop, closePanels);
+document.getElementById('btn-prev').addEventListener('click', e => { e.stopPropagation(); goPrev(); });
+document.getElementById('btn-next').addEventListener('click', e => { e.stopPropagation(); goNext(); });
+
+// ── Chapter navigation buttons on jump-to-% panel ─────────────────────────────
+function bindJumpChapNav(btnId, direction) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const { tops, idx } = findCurrentTopLevelChapIdx();
+    if (!tops.length) return;
+    let target = null;
+    if (direction === 'prev') {
+      if (idx > 0) target = tops[idx - 1];
+      else if (idx === 0) target = tops[0];
+      else target = tops[0];
+    } else if (idx < 0) {
+      const curSpine = currentSpineIndex;
+      target = curSpine != null && curSpine >= 0
+        ? tops.find(t => {
+          const si = findSpineItemForHref((t.href || '').split('#')[0]);
+          return si?.index != null && si.index > curSpine;
+        }) || null
+        : tops[0];
+    } else if (idx < tops.length - 1) {
+      target = tops[idx + 1];
+    }
+    if (!target) return;
+    closeJumpPanel();
+    await navigateToTocChapter(target);
+  });
+}
+bindJumpChapNav('btn-prev-chap', 'prev');
+bindJumpChapNav('btn-next-chap', 'next');
+function handleNavZoneActivate(direction, e) {
+  if (direction === 'prev') goPrev(); else goNext();
+}
+document.querySelector('.nav-zone-prev')?.addEventListener('click', e => { e.stopPropagation(); handleNavZoneActivate('prev', e); });
+document.querySelector('.nav-zone-next')?.addEventListener('click', e => { e.stopPropagation(); handleNavZoneActivate('next', e); });
+document.getElementById('btn-prev').addEventListener('keydown', e => { if (e.key === 'Enter') goPrev(); });
+document.getElementById('btn-next').addEventListener('keydown', e => { if (e.key === 'Enter') goNext(); });
+window.addEventListener('beforeunload', () => {
+  if (isPeekMode && currentBook) {
+    try { sessionStorage.setItem('br_last_peek_book_id', String(currentBook.id)); } catch { /* ignore */ }
+  }
+  cancelDebouncedSync();
+  stopPeriodicSync();
+  if (!prefs.skipSaveOnClose) saveProgressBackground();
+  endStatsSessionBackground();
+  // Ephemeral BookOrbit peek (see server/utils/peekCleanup.js) — signal the server to delete the
+  // temp row + file now, rather than waiting for the background sweep. Best-effort only: async
+  // work isn't guaranteed to finish during page teardown, especially on an abrupt/forced close —
+  // the keepalive fetch below and the server-side sweep are the actual guarantees, not this call.
+  if (isPeekMode && currentBook?.peek_expires_at) {
+    const token = getToken();
+    fetch(`/api/books/${currentBook.id}/peek-cleanup`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      keepalive: true,
+    }).catch(() => {});
+    removeBook(currentBook.id).catch(() => {}); // best-effort IndexedDB metadata cleanup
+  }
+});
+document.addEventListener('fullscreenchange', async () => {
+  syncFullscreenButton();
+
+  // Keep layout height in sync on desktop after fullscreen toggle.
+  document.documentElement.style.setProperty('--layout-h', window.innerHeight + 'px');
+
+  // Wait two frames so flex layout + CSS vars settle before re-paginating.
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (_cxReader) _cxSyncLayout();
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  if (window !== window.parent && (!window.parent._bookMetadata || !window.parent._epubArrayBuffer)) {
+    log('[reader] Waiting for window.parent to supply book data...');
+    setTimeout(init, 50);
+    return;
+  }
+  await _i18nReady;
+
+  // If localStorage was cleared (no saved prefs), restore dict selection/order from the
+  // server copy so word lookups use the user's configured dictionaries, not the language default.
+  if (!localStorage.getItem('br_reader_prefs')) {
+    apiFetch('/settings').then(s => {
+      const sp = typeof s.reader_prefs === 'string' ? JSON.parse(s.reader_prefs) : (s.reader_prefs || {});
+      if (sp.dictionaryOrder?.length) prefs.dictionaryOrder = sp.dictionaryOrder;
+      if (sp.dictionaries !== undefined) prefs.dictionaries = sp.dictionaries;
+      if (sp.dictionaryMeta) prefs.dictionaryMeta = sp.dictionaryMeta;
+    }).catch(() => {});
+  }
+
+  log('[reader] UA:', navigator.userAgent.slice(0, 200));
+  log('[reader] bookId:', bookId, 'online:', navigator.onLine);
+
+  const _chromeMatch = /Chrome\/(\d+)/.exec(navigator.userAgent);
+  const _chromeMajor = _chromeMatch ? parseInt(_chromeMatch[1]) : 999;
+  const _legacyWebView = /\bwv\b/.test(navigator.userAgent) && _chromeMajor < 90;
+  if (_legacyWebView) log('[reader] legacyWebView Chrome/' + _chromeMajor);
+
+  // Always inherit library e-ink setting so reader opens in e-ink when library is in e-ink mode
+  if (localStorage.getItem('br_library_theme') === 'eink' ||
+      (typeof window.AndroidCodexa?.isEinkMode === 'function' && window.AndroidCodexa.isEinkMode())) {
+    prefs.eink = true;
+  }
+  log('[reader] theme:', prefs.theme, 'eink:', prefs.eink);
+  applyUiTheme();
+  applyPageShadow();
+  applyAutoHide();
+  syncFullscreenButton();
+
+  // On Chrome 83 WebView (inkPalmPlus): loadCustomFonts() MUST come before
+  // initSettingsUi(). initSettingsUi() does 66ms of heavy DOM work that
+  // permanently breaks fetch() on this WebView if it runs first. This matches
+  // the order in br-v51 (the last known-good version).
+  if (_legacyWebView) {
+    await loadCustomFonts().catch(() => {});
+  }
+
+  log('[reader] initSettingsUi...');
+  initSettingsUi();
+  log('[reader] applyVolumeKeyMode...');
+  applyVolumeKeyMode(prefs.volumeKeysEnabled);
+  log('[reader] isAndroidApp:', isAndroidApp(), 'setReaderMode:', !!window.AndroidCodexa?.setReaderMode);
+  if (prefs.lockPortrait) void applyPortraitLock(true);
+
+  // rAF heartbeat: on some e-ink WebViews Chromium throttles setTimeout when no
+  // CSS animations are running. A pending rAF keeps the scheduler active so
+  // withTimeout fires. Not used for legacy WebViews — the old loading path has no
+  // timeouts and the rAF DOM writes can interfere with fetch resolution on slow renders.
+  let _rafStop = false;
+  let _rafDotTs = 0;
+  if (!_legacyWebView) {
+    (function _loadingRaf() {
+      if (_rafStop) return;
+      const now = Date.now();
+      if (loadingMsg && now - _rafDotTs >= 600) {
+        _rafDotTs = now;
+        const clean = loadingMsg.textContent.replace(/[. ]+$/, '');
+        loadingMsg.textContent = clean + '.'.repeat((Math.floor(now / 600) % 3) + 1);
+      }
+      requestAnimationFrame(_loadingRaf);
+    })();
+  }
+
+  // ── Helper: race any promise against a ms timeout ──────────────────────────
+  function withTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => {
+        warn('[reader] withTimeout fired', ms, 'ms');
+        reject(new Error('timeout ' + ms + 'ms'));
+      }, ms)),
+    ]);
+  }
+
+  // ── Book metadata ──────────────────────────────────────────────────────────
+  log('[reader] loading book metadata...');
+  let arrayBuffer;
+  if (window.parent && window.parent._bookMetadata && window.parent._epubArrayBuffer) {
+    currentBook = window.parent._bookMetadata;
+    const parentBuf = window.parent._epubArrayBuffer;
+    arrayBuffer = new ArrayBuffer(parentBuf.byteLength);
+    new Uint8Array(arrayBuffer).set(new Uint8Array(parentBuf));
+    bookTitleEl.textContent = currentBook.title;
+    document.title = `${currentBook.title} — Codexa`;
+    loadBookPrefs(currentBook.id);
+    syncSettingsUi();
+    log('[reader] metadata and epub loaded from window.parent');
+  } else {
+  try {
+    loadingMsg.textContent = t('reader.loading_book');
+    if (_legacyWebView) {
+      // Legacy path (br-v51 pattern): network first → IDB only as offline fallback.
+      // IDB-first hangs on old WebViews; apiFetch is reliable when it settles — but on a
+      // WiFi-associated-but-no-internet connection (radio "online" per navigator.onLine,
+      // actual internet flaky/gone — exactly the mid-read online→offline transition), a plain
+      // fetch() can hang indefinitely on this WebView instead of rejecting, so the IDB
+      // fallback below never runs and the reader is stuck on a blank loading screen. Race it
+      // against a timeout so a hang degrades into the same offline fallback a clean failure gets.
+      log('[reader] metadata: network-first (legacy)');
+      try {
+        currentBook = await withTimeout(apiFetch(`/books/${bookId}`), 10000);
+        log('[reader] book metadata from network:', currentBook.title);
+      } catch {
+        const _meta = await getBookMeta(Number(bookId));
+        if (!_meta) throw new Error(t('reader.err_no_book'));
+        currentBook = _meta;
+        log('[reader] book metadata from IDB (offline):', currentBook.title);
+      }
+    } else {
+      // Modern path: IDB first (fast offline start) → network fallback.
+      let _localMeta = null;
+      try {
+        const _idbTimeout = new Promise((_, rej) =>
+          setTimeout(() => rej(new Error('idb-timeout')), 2000)
+        );
+        _localMeta = await Promise.race([getBookMeta(Number(bookId)), _idbTimeout]);
+      } catch (e) {
+        warn('[reader] getBookMeta failed (' + (e?.message || e) + '), using network');
+      }
+      // Prefer IDB when it has a usable KOSync hash (avoids stale-hash KOSync issue).
+      // Otherwise fetch from network and use IDB as offline fallback if network fails.
+      if (_localMeta && (_localMeta.file_hash_md5 || _localMeta.kosync_hash)) {
+        currentBook = _localMeta;
+        log('[reader] book metadata from IndexedDB:', currentBook.title);
+      } else {
+        log('[reader] fetching book metadata from network...');
+        const _tok = getToken();
+        try {
+          // Timeout-guarded: a stale-online connection (radio associated, no real internet)
+          // can leave fetch() pending indefinitely instead of rejecting, which would otherwise
+          // hang here forever instead of falling through to the IDB fallback below.
+          const _res = await withTimeout(fetch('/api/books/' + bookId, {
+            headers: Object.assign({ Accept: 'application/json' }, _tok ? { Authorization: 'Bearer ' + _tok } : {}),
+          }), 10000);
+          log('[reader] fetch status:', _res.status);
+          if (!_res.ok) throw new Error('HTTP ' + _res.status);
+          currentBook = await _res.json();
+          log('[reader] book metadata from network:', currentBook.title);
+          // Ephemeral peek rows are deleted shortly after close — don't leave a metadata entry
+          // behind in the offline IndexedDB store for an id that will never be reopened.
+          if (!isPeekMode) saveBookMeta(currentBook).catch(() => {});
+        } catch (_netErr) {
+          if (_localMeta) {
+            currentBook = _localMeta;
+            log('[reader] network failed, using IDB fallback:', currentBook.title);
+          } else {
+            throw _netErr;
+          }
+        }
+      }
+    }
+    bookTitleEl.textContent = currentBook.title;
+    document.title = `${currentBook.title} — Codexa`;
+    loadBookPrefs(currentBook.id);
+    syncSettingsUi();
+  } catch (err) {
+    console.error('[reader] book metadata failed:', err?.message);
+    const msg = t('reader.err_no_book');
+    loadingMsg.textContent = msg;
+    toast.error(msg);
+    setTimeout(() => { window.location.href = libraryReturnUrl; }, 2500);
+    return;
+  }
+
+  // ── EPUB file ──────────────────────────────────────────────────────────────
+  log('[reader] loading epub...');
+  try {
+    _rafStop = true; // stop dots — show progress % for network downloads
+    loadingMsg.textContent = t('reader.loading_file');
+    if (_legacyWebView) {
+      // Legacy path (br-v51 pattern): network first → CacheStorage only as offline fallback.
+      // Both awaits are timeout-guarded — see the metadata fetch above for why: a stale-online
+      // connection can leave either the headers or the body stream hanging forever on this
+      // WebView instead of rejecting, which would otherwise skip the CacheStorage fallback
+      // entirely and leave the reader stuck on a blank loading screen.
+      log('[reader] epub: network-first (legacy)');
+      try {
+        const _legRes = await withTimeout(fetch(`/api/books/${bookId}/file`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }), 12000);
+        if (!_legRes.ok) throw new Error(`HTTP ${_legRes.status}`);
+        arrayBuffer = await withTimeout(_legRes.arrayBuffer(), 30000);
+        log('[reader] epub from network (legacy), bytes:', arrayBuffer.byteLength);
+      } catch {
+        arrayBuffer = await fetchOfflineBookFile(bookId);
+        if (arrayBuffer) log('[reader] epub from CacheStorage (offline), bytes:', arrayBuffer.byteLength);
+      }
+    } else {
+      // Modern path: CacheStorage first (instant offline) → network fallback.
+      const _cacheTimeout = new Promise((_, rej) =>
+        setTimeout(() => rej(new Error('cache-timeout')), 3000)
+      );
+      arrayBuffer = await Promise.race([fetchOfflineBookFile(bookId), _cacheTimeout]).catch(() => null);
+      if (arrayBuffer) {
+        log('[reader] epub from CacheStorage, bytes:', arrayBuffer.byteLength);
+      }
+      if (!arrayBuffer) {
+        log('[reader] fetching epub from network...');
+        const res = await withTimeout(
+          fetch(`/api/books/${bookId}/file`, { headers: { Authorization: `Bearer ${getToken()}` } }),
+          12000
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const _dlTotal = parseInt(res.headers.get('content-length') || '0', 10);
+        if (_dlTotal > 0 && res.body) {
+          const _dlReader = res.body.getReader();
+          const _dlChunks = [];
+          let _dlLoaded = 0, _dlLastPct = -1;
+          const _dlStep = prefs.eink ? 10 : 5;
+          while (true) {
+            const { done, value } = await _dlReader.read();
+            if (done) break;
+            _dlChunks.push(value);
+            _dlLoaded += value.length;
+            const _dlPct = Math.min(99, Math.floor(_dlLoaded / _dlTotal * 100));
+            if (_dlPct >= _dlLastPct + _dlStep) {
+              _dlLastPct = _dlPct;
+              if (loadingMsg) loadingMsg.textContent = t('reader.loading_file') + ' ' + _dlPct + '%';
+            }
+          }
+          if (loadingMsg) loadingMsg.textContent = t('reader.loading_file') + ' 100%';
+          const _dlBuf = new Uint8Array(_dlLoaded);
+          let _dlOff = 0;
+          for (const _dlC of _dlChunks) { _dlBuf.set(_dlC, _dlOff); _dlOff += _dlC.length; }
+          arrayBuffer = _dlBuf.buffer;
+        } else {
+          arrayBuffer = await withTimeout(res.arrayBuffer(), 30000);
+        }
+        log('[reader] epub from network, bytes:', arrayBuffer.byteLength);
+      }
+    }
+  } catch (err) {
+    warn('[reader] epub load failed:', err?.message);
+    if (!arrayBuffer) {
+      const msg = !navigator.onLine
+        ? t('reader.err_offline_not_cached')
+        : t('reader.err_download');
+      console.error('[reader] no epub available');
+      loadingMsg.textContent = msg;
+      toast.error(msg);
+      setTimeout(() => { window.location.href = libraryReturnUrl; }, 2500);
+      return;
+    }
+  }
+  }
+
+  // Critical loading complete — now safe to start background fetch() calls.
+  if (currentBook?.id) {
+    apiFetch(`/books/${currentBook.id}/opened`, { method: 'POST' }).catch(() => {});
+    if (!_legacyWebView) {
+      // Refresh cached metadata in background
+      const _rtok = getToken();
+      fetch('/api/books/' + bookId, {
+        headers: Object.assign({ Accept: 'application/json' }, _rtok ? { Authorization: 'Bearer ' + _rtok } : {}),
+      }).then(r => r.ok ? r.json() : null).then(b => { if (b) saveBookMeta(b).catch(() => {}); }).catch(() => {});
+    }
+  }
+  log('[reader] fonts loading (non-blocking)...');
+  loadCustomFonts().then(() => {
+    log('[reader] fonts loaded, count:', customFonts.length);
+    // If user has never changed the font (still at factory default 'Georgia, serif') and
+    // Bookerly is available, default to it. Only runs once — persistPrefs() saves the choice.
+    if (customFonts.length && prefs.fontFamily === DEFAULT_PREFS.fontFamily) {
+      const bookerly = customFonts.find(f => f.label.toLowerCase() === 'bookerly');
+      if (bookerly) {
+        prefs.fontFamily = bookerly.value;
+        persistPrefs();
+      }
+    }
+    // Re-apply styles to inject @font-face declarations into the active reader frame
+    // (needed when fonts finish loading after the initial render)
+    if (_cxReader) reapplyStyles();
+    populateFontSelect();
+  }).catch(err => {
+    warn('[reader] fonts failed:', err?.message);
+  });
+
+  // Activate reader mode AFTER network calls — avoids blocking fetches on e-ink devices
+  log('[reader] setReaderMode(true)...');
+  if (isAndroidApp() && window.AndroidCodexa?.setReaderMode) {
+    window.AndroidCodexa.setReaderMode(true);
+    setTimeout(() => {
+      const r = document.documentElement;
+      r.style.setProperty('--sat', '0px');
+      r.style.setProperty('--sab', '0px');
+      r.style.setProperty('--layout-h', window.innerHeight + 'px');
+      if (_cxReader) _cxSyncLayout();
+    }, 600);
+  }
+
+  // Auto-download to offline cache in background after successful file load (skip in peek mode)
+  if (!isPeekMode && navigator.onLine && currentBook && !_legacyWebView) {
+    isBookDownloaded(Number(bookId)).then(cached => {
+      if (!cached) downloadBook(currentBook, getToken()).catch(() => {});
+    }).catch(() => {});
+  }
+
+  try {
+    loadingMsg.textContent = t('reader.loading_open');
+    _epubArrayBuffer = arrayBuffer;
+    // CXReader parses the EPUB itself (JSZip) and builds the TOC + chapter markers from
+    // its own spine/navigation when rendering starts (see startCXRendition).
+
+    let startCfi      = null;
+    let localProgress = null;
+    let _offlineProgressAhead = false; // local (offline) progress is ahead of server → push on open
+    const bionicReloadState = readBionicReloadState();
+    let reloadStartPct = null;
+    let skipOpenSync = false;
+    if (bionicReloadState && bionicReloadState.bookId === bookId && bionicReloadState.bionicReading === !!prefs.bionicReading) {
+      if (bionicReloadState.cfi) startCfi = bionicReloadState.cfi;
+      if (typeof bionicReloadState.pct === 'number') reloadStartPct = bionicReloadState.pct;
+      // Do NOT skip KOSync for bionic reloads — only skip for resume-reading opens
+      clearBionicReloadState();
+    }
+    // Session restore: library.js writes a resume hint to sessionStorage before navigating here
+    let resumeStartPct = null;
+    try {
+      const raw = sessionStorage.getItem(RESUME_STATE_KEY);
+      sessionStorage.removeItem(RESUME_STATE_KEY);
+      if (raw) {
+        const rs = JSON.parse(raw);
+        if (rs && rs.bookId === bookId && rs.cfi) {
+          if (!startCfi) startCfi = rs.cfi;
+          if (typeof rs.pct === 'number') resumeStartPct = rs.pct;
+          skipOpenSync = true; // user explicitly chose this exact position — skip remote sync
+          log('[session-restore] using saved cfi:', rs.cfi.slice(0, 60), 'pct:', ((rs.pct||0)*100).toFixed(2)+'%');
+        }
+      }
+    } catch { /* ignore */ }
+    try {
+      try {
+        // Read the locally-cached position first. While offline, saveProgressBackground()
+        // writes the latest position to localStorage but can't reach the server/KOSync.
+        // If that local copy is ahead of the server when we reconnect, resume from it and
+        // push it on open — otherwise reopening would discard the offline reading.
+        let _cachedLocal = null;
+        try {
+          const _raw = localStorage.getItem(`br_progress_${currentBook.file_hash}`);
+          if (_raw) _cachedLocal = JSON.parse(_raw);
+        } catch { /* ignore */ }
+        let _serverProgress = null;
+        if (window.parent && window.parent._bookMetadata) {
+          // Skip progress fetch
+        } else {
+          _serverProgress = await apiFetch(`/progress/${currentBook.file_hash}`);
+        }
+        if (_cachedLocal && (_cachedLocal.percentage || 0) > (_serverProgress?.percentage || 0) + 0.005) {
+          log('[reader] offline progress ahead of server ('
+            + Math.round((_cachedLocal.percentage || 0) * 100) + '% > '
+            + Math.round((_serverProgress?.percentage || 0) * 100) + '%) — resuming local, will push');
+          localProgress = _cachedLocal;
+          _offlineProgressAhead = true;
+          // Keep the local copy — do NOT overwrite it with the stale server value.
+        } else {
+          localProgress = _serverProgress;
+          if (localProgress) {
+            try { localStorage.setItem(`br_progress_${currentBook.file_hash}`, JSON.stringify(localProgress)); } catch { /* ignore */ }
+          }
+        }
+      } catch {
+        try {
+          const cached = localStorage.getItem(`br_progress_${currentBook.file_hash}`);
+          if (cached) localProgress = JSON.parse(cached);
+        } catch { /* ignore */ }
+      }
+      log('[reader] localProgress:', localProgress?.cfi_position?.slice(0, 60), 'pct:', localProgress?.percentage);
+      if (localProgress?.percentage > 0) {
+        lastKnownGoodPct = localProgress.percentage;
+        // Seed the high-water mark so we never push below what the server already has
+        if (localProgress.percentage > bestKnownRemotePct) bestKnownRemotePct = localProgress.percentage;
+        // Keep the offline metadata in sync so "Currently Reading" is correct offline
+        if (!_legacyWebView) getBookMeta(Number(bookId)).then(meta => {
+          if (meta) saveBookMeta({ ...meta, percentage: localProgress.percentage }).catch(() => {});
+        }).catch(() => {});
+      }
+      if (!startCfi && localProgress?.cfi_position) startCfi = localProgress.cfi_position;
+    } catch { /* start from beginning */ }
+
+    log('[reader] startRendition:', startCfi?.slice(0, 60) ?? 'null');
+    await startRendition(startCfi);
+    loadAvailableDicts().then(updateDictButtonVisibility).catch(() => {});
+    _rafStop = true;
+    loadingOverlay.classList.add('hidden');
+    // Hide viewer while we navigate to the correct page; revealed below after all seeks complete.
+    // opacity:0 keeps layout intact so epub.js/CXReader measure columns correctly.
+    epubViewer.style.opacity = '0';
+    const _revealViewer = () => {
+      if (!prefs.eink) {
+        epubViewer.style.transition = 'opacity 0.15s';
+        setTimeout(() => { epubViewer.style.transition = ''; }, 200);
+      }
+      epubViewer.style.opacity = '';
+    };
+    // Safety: reveal after 3 s even if the code below never reaches the normal reveal path.
+    const _revealTimer = setTimeout(_revealViewer, 3000);
+    // Deferred from init start: acquire wake lock only after book is fully loaded
+    // to avoid potential compositor/timer interference during loading on e-ink WebViews.
+    acquireWakeLock();
+    // On Chrome 83 WebView, initHeaderFit() is deferred until here so its ResizeObserver
+    // and MutationObserver don't run while critical fetch() calls are in flight.
+    if (_legacyWebView) initHeaderFit();
+
+    // CXReader restores position from startCfi (chapter) + the saved exact page / percentage
+    // in the sync block below; no epub.js locations-based pct seek is needed here.
+
+    // Check remote/internal sync AFTER book is visible.
+    // syncOnOpen's network request also gives epub.js time to fully settle its layout,
+    // which is why the CFI correction loop below runs after this call.
+    const syncTarget = (prefs.skipOpenProgressCheck || skipOpenSync || isPeekMode) ? null : await syncOnOpen(localProgress);
+    if (syncTarget?.percentage != null) {
+      if (_cxReader) {
+        // CXReader: navigate by percentage — most reliable since DocFragment data can be
+        // stale/mismatched from earlier sessions. Percentage scales linearly over spine count.
+        await _cxReader.goToPct(syncTarget.percentage);
+        // goToPct only resolves to chapter level (page 1); fine-tune to the exact page.
+        _cxReader.seekToPercent(syncTarget.percentage);
+      }
+    } else if (_cxReader && localProgress?.percentage > 0 && !isPeekMode) {
+      // CXReader, no sync jump: restore exact page first; fall back to % if out of range.
+      // Skip in peek mode: peek never saves position.
+      let exactRestored = false;
+      try {
+        const raw = localStorage.getItem(`br_cx_page_${currentBook?.id}`);
+        if (raw) {
+          const { spineIdx: si, page: pg } = JSON.parse(raw);
+          if (si === _cxStartIdx && pg > 1 && pg <= _cxReader.pageCount) {
+            _cxReader.seekToPage(pg);
+            exactRestored = true;
+          }
+        }
+      } catch { /* ignore */ }
+      if (!exactRestored) _cxReader.seekToPercent(localProgress.percentage);
+    }
+
+    // Capture final position after all navigation (local seek + sync) is complete.
+    // CXReader tracks its own position in the live paginator — read it directly.
+    // Do NOT fall through to localProgress.percentage: that is the DB value from before
+    // init started, and any navigation above (goToPct / seekToPercent) may have already
+    // moved to a different page within the chapter, so the stale DB value would overwrite
+    // the corrected pct and cause the wrong page to be re-saved on close.
+    if (_cxReader) {
+      currentCfi = _cxReader.makeCfi();
+      const p = _cxReader.makePct();
+      if (p > 0) currentPct = p;
+    }
+    log('[pos] final position before isReady cfi:', currentCfi.slice(0,60), 'pct:', (currentPct*100).toFixed(2)+'%');
+    isReady = true;
+    log('[pos] isReady=true, currentCfi:', currentCfi.slice(0,60));
+    openCfi = currentCfi;      // snapshot position-on-open for change detection
+    openPct = currentPct;      // snapshot pct-on-open for within-chapter change detection (CXReader CFI is chapter-level only)
+    if (_offlineProgressAhead && !isPeekMode) {
+      // We resumed from a position read offline that the server/KOSync never received.
+      // Force a remote + KOSync push now so reopening online actually syncs offline reading.
+      lastSyncedCfi = '';
+      log('[kosync] pushing offline-read progress on open, pct:', (currentPct * 100).toFixed(2) + '%');
+      void saveProgress({ forceRemote: true, forced: true, inSession: true });
+    } else {
+      lastSyncedCfi = currentCfi; // server already knows this position — no immediate remote push needed
+    }
+    _kosyncPushFailures    = 0;
+    _kosyncWarnedThisSession = false;
+    // Jump to a specific CFI if provided via ?jumpcfi= URL param (bookmarks/annotations deep-link)
+    // Use navigateToCfi: handles CXReader, converts range CFIs (highlights) to start CFIs, and falls back to %.
+    const _jumpCfi = params.get('jumpcfi');
+    // CXReader needs annotations pre-loaded so onBeforePaginate can inject <mark> elements into
+    // the chapter DOM, and scrollToAnnotation can then page to the correct position within it.
+    // Without this, annotationsCache is empty at jump time → scrollToAnnotation is never called
+    // → CXReader lands on page 1 of the chapter instead of the annotated page.
+    let _annotationsPreloaded = false;
+    if (_jumpCfi && _cxReader) {
+      await loadAnnotations(currentBook.id);
+      _annotationsPreloaded = true;
+    }
+    if (_jumpCfi) {
+      try { await navigateToCfi(_jumpCfi); } catch { /* invalid CFI — stay at current pos */ }
+    }
+    // All navigation is done — reveal the viewer at the correct page.
+    clearTimeout(_revealTimer);
+    _revealViewer();
+    // Re-paginate after reveal so measurements are taken with the element visible.
+    // The paginator ran at opacity:0; on some mobile WebViews this causes the last
+    // line of the first page to be clipped on first open. setLayout({}) re-runs the
+    // paginator preserving position via fractional page index (see cxreader/index.js).
+    if (_cxReader) {
+      requestAnimationFrame(() => _cxReader.setLayout({}));
+    }
+    // Peek mode: always notify user that progress is not saved
+    if (isPeekMode) toast.info(t('reader.peek_mode_hint'));
+    cancelDebouncedSync();
+    startPeriodicSync();
+    void initBattery();
+    initOnlineStatus();
+        // Load bookmarks and annotations for this book (non-blocking)
+    void loadBookmarks(currentBook.id);
+    if (!_annotationsPreloaded) void loadAnnotations(currentBook.id);
+    // Start a stats session (non-blocking)
+    void startStatsSession(currentBook.id);    
+    // Final chapter-name refresh — by now TOC and relocated have both fired
+    if (lastChapterHref) {
+      chapterTitleEl.textContent = chapterLabelFromHref(lastChapterHref);
+    }
+    // Immediately render correct pctBook (and other stats) into the status bar.
+    // Without this, pctBook stays 0% until the next relocated event or 30s clock tick.
+    updateStatusBar();
+  } catch (err) {
+    _rafStop = true;
+    console.error('[reader]', err);
+    loadingMsg.textContent = t('reader.err_open', { msg: err.message });
+    toast.error(t('reader.err_no_open'));
+  }
+}
+
+init();
+
+// Re-render settings panel content when language changes
+document.addEventListener('langchange', () => {
+  applyTranslations();
+  syncSettingsUi();
+  syncFullscreenButton();
+  renderSbItems();
+  renderDictSettings();
+  populateSbFontSelect();
+});

@@ -1,0 +1,720 @@
+/**
+ * sidebar.js — shared sidebar module used by all pages (library, settings, opds).
+ * Handles: rendering, shelf loading, collapse/expand, mobile toggle, logout, active state.
+ * Exports: initSidebar, reloadShelves, getShelves, setActive
+ */
+import { apiFetch, requireAuth, clearToken } from './api.js';
+import { t, initIconLangPicker } from './i18n.js';
+import { showPanel, getCurrentPanel } from './router.js';
+import { confirmDialog } from './ui.js';
+
+const LIB_THEME_KEY = 'br_library_theme';
+const LIB_THEMES = new Set(['system', 'day', 'night', 'eink']);
+
+let shelves           = [];
+let _activePage       = 'library';
+const _shelfBadges    = new Map(); // shelfId → new-book count, survives re-renders
+let _onShelfSelect    = null;
+let _activeShelfId    = 'all';
+let _readingCount     = 0;
+let _downloadedCount  = 0;
+let _shelfEditMode    = false;
+let _bookorbitVisible = false;
+let _bookorbitWarning = false;
+let _opdsVisible      = false;
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * @param {Object} opts
+ * @param {Function|null} opts.onShelfSelect  called(shelfId) when a library shelf is selected
+ * @param {string|number}  opts.activeShelfId  'all' | 'reading' | shelf-id
+ */
+export async function initSidebar({ onShelfSelect = null, activeShelfId = 'all' } = {}) {
+  if (!requireAuth()) return;
+
+  _onShelfSelect = onShelfSelect;
+  _activeShelfId = activeShelfId;
+
+  const sidebar = document.getElementById('app-sidebar');
+  if (!sidebar) return;
+
+  sidebar.innerHTML = buildSidebarHtml();
+  initLibraryThemeControls(sidebar);
+  initDisplaySizeControls(sidebar);
+  initSidebarLangPicker(sidebar.querySelector('#sidebar-lang-picker'));
+
+  // BookOrbit + Online library nav item visibility — fetched here (not left to library.js's own
+  // /settings fetch) so both are correct even when the app opens directly into a non-library
+  // panel. One request for both: GET /settings already returns opds_servers in full (it's the
+  // same data GET /opds/servers exposes, just not password-stripped — fine here since it's never
+  // rendered, only counted), so there's no need for a second round trip on every page load just
+  // to check whether any OPDS server is configured.
+  apiFetch('/settings').then(s => {
+    setBookorbitNavVisible(!!s.bookorbit_sync_enabled);
+    if (s.bookorbit_sync_enabled) checkBookorbitHealth();
+    setOpdsNavVisible((s.opds_servers || []).length > 0);
+  }).catch(() => {});
+
+  // Username
+  const user = JSON.parse(localStorage.getItem('br_user') || '{}');
+  sidebar.querySelector('#sidebar-username').textContent = user.name || user.username || '';
+
+  // Collapse / expand
+  const collapseBtn = sidebar.querySelector('#sidebar-collapse-btn');
+  if (localStorage.getItem('sidebarCollapsed') === '1') {
+    sidebar.classList.add('collapsed');
+    collapseBtn.textContent = '›';
+    collapseBtn.title = t('sidebar.expand');
+  }
+  collapseBtn.addEventListener('click', () => {
+    if (window.matchMedia('(max-width: 768px)').matches) { closeSidebar(); return; }
+    const collapsed = sidebar.classList.toggle('collapsed');
+    collapseBtn.textContent = collapsed ? '›' : '‹';
+    collapseBtn.title = collapsed ? t('sidebar.expand') : t('sidebar.collapse');
+    localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+  });
+
+  // Mobile open / close
+  document.getElementById('sidebar-open-btn')?.addEventListener('click', openSidebar);
+  const overlay = document.getElementById('sidebar-overlay');
+  overlay?.addEventListener('click', closeSidebar);
+  overlay?.addEventListener('touchend', (e) => { e.preventDefault(); closeSidebar(); });
+
+  // Logout
+  sidebar.querySelector('#sidebar-logout-btn').addEventListener('click', () => {
+    if (!navigator.onLine) {
+      confirmDialog(t('sidebar.logout_offline_warning'), () => { clearToken(); window.location.href = '/login.html'; }, t('sidebar.logout'), false);
+      return;
+    }
+    clearToken();
+    window.location.href = '/login.html';
+  });
+
+  // Nav: Trenutno berem
+  sidebar.querySelector('#nav-currently-reading').addEventListener('click', e => {
+    e.preventDefault();
+    navigate('reading');
+  });
+
+  // Nav: Downloaded
+  sidebar.querySelector('#nav-downloaded').addEventListener('click', e => {
+    e.preventDefault();
+    navigate('downloaded');
+  });
+
+  // Nav: Vsa knjižnica
+  sidebar.querySelector('#nav-all-books').addEventListener('click', e => {
+    e.preventDefault();
+    navigate('all');
+  });
+
+  // Add shelf button
+  sidebar.querySelector('#add-shelf-btn').addEventListener('click', () => {
+    if (!navigator.onLine) return;
+    document.dispatchEvent(new CustomEvent('sidebar:addshelf'));
+  });
+
+  _attachShelfEditBtn();
+
+  // Nav: Settings and OPDS panels — blocked when offline (both require live API)
+  sidebar.querySelector('#nav-settings')?.addEventListener('click', e => {
+    e.preventDefault();
+    if (!navigator.onLine) return;
+    showPanel('settings'); closeSidebar();
+  });
+  sidebar.querySelector('#nav-opds')?.addEventListener('click', e => {
+    e.preventDefault();
+    if (!navigator.onLine) return;
+    showPanel('opds'); closeSidebar();
+  });
+  sidebar.querySelector('#nav-bookorbit')?.addEventListener('click', e => {
+    e.preventDefault();
+    if (!navigator.onLine) return;
+    showPanel('bookorbit'); closeSidebar();
+  });
+
+  // Statistics button
+  sidebar.querySelector('#sidebar-stats-btn')?.addEventListener('click', () => {
+    if (!navigator.onLine) return;
+    document.dispatchEvent(new CustomEvent('sidebar:stats'));
+  });
+
+  // Active item will be set by panelchange event; set initial state from router
+  const currentPanel = getCurrentPanel() || 'library';
+  if (currentPanel === 'settings') {
+    sidebar.querySelector('#nav-settings')?.classList.add('sidebar-item-active');
+  } else if (currentPanel === 'opds') {
+    sidebar.querySelector('#nav-opds')?.classList.add('sidebar-item-active');
+  } else if (currentPanel === 'bookorbit') {
+    sidebar.querySelector('#nav-bookorbit')?.classList.add('sidebar-item-active');
+  } else {
+    setActive(activeShelfId);
+  }
+
+  // Update active sidebar item whenever the router switches panels
+  document.addEventListener('panelchange', e => {
+    _activePage = e.detail.panel;
+    if (_activePage === 'settings') {
+      document.querySelectorAll('#nav-all-books, #nav-currently-reading, #nav-downloaded, .sidebar-shelf-item, #nav-opds, #nav-bookorbit')
+        .forEach(el => el.classList.remove('sidebar-item-active'));
+      document.getElementById('nav-settings')?.classList.add('sidebar-item-active');
+    } else if (_activePage === 'opds') {
+      document.querySelectorAll('#nav-all-books, #nav-currently-reading, #nav-downloaded, .sidebar-shelf-item, #nav-settings, #nav-bookorbit')
+        .forEach(el => el.classList.remove('sidebar-item-active'));
+      document.getElementById('nav-opds')?.classList.add('sidebar-item-active');
+    } else if (_activePage === 'bookorbit') {
+      document.querySelectorAll('#nav-all-books, #nav-currently-reading, #nav-downloaded, .sidebar-shelf-item, #nav-settings, #nav-opds')
+        .forEach(el => el.classList.remove('sidebar-item-active'));
+      document.getElementById('nav-bookorbit')?.classList.add('sidebar-item-active');
+    } else {
+      document.getElementById('nav-settings')?.classList.remove('sidebar-item-active');
+      document.getElementById('nav-opds')?.classList.remove('sidebar-item-active');
+      document.getElementById('nav-bookorbit')?.classList.remove('sidebar-item-active');
+      setActive(_activeShelfId);
+    }
+  });
+
+  await loadNavCounts();
+  await reloadShelves();
+}
+
+async function loadNavCounts() {
+  try {
+    const books = await apiFetch('/books');
+    const allEl     = document.getElementById('nav-all-count');
+    const readingEl = document.getElementById('nav-reading-count');
+    if (allEl) allEl.textContent = books.length;
+    _readingCount = books.filter(b => (b.percentage || 0) > 0).length;
+    if (readingEl) readingEl.textContent = _readingCount;
+    applyCurrentlyReadingVisibility();
+  } catch { /* non-critical */ }
+}
+
+function applyCurrentlyReadingVisibility() {
+  const navEl = document.getElementById('nav-currently-reading');
+  if (!navEl) return;
+  navEl.style.display = _readingCount > 0 ? '' : 'none';
+}
+
+export async function reloadShelves() {
+  try {
+    shelves = await apiFetch('/shelves');
+    renderShelves();
+  } catch { /* not authenticated or network error */ }
+}
+
+export function getShelves() { return shelves; }
+
+export function setActive(shelfId) {
+  _activeShelfId = shelfId;
+  document.querySelectorAll('#nav-all-books, #nav-currently-reading, #nav-downloaded, .sidebar-shelf-item, #nav-settings, #nav-opds, #nav-bookorbit')
+    .forEach(el => el.classList.remove('sidebar-item-active'));
+
+  if (shelfId === 'all') {
+    document.getElementById('nav-all-books')?.classList.add('sidebar-item-active');
+  } else if (shelfId === 'reading') {
+    document.getElementById('nav-currently-reading')?.classList.add('sidebar-item-active');
+  } else if (shelfId === 'downloaded') {
+    document.getElementById('nav-downloaded')?.classList.add('sidebar-item-active');
+  } else {
+    document.querySelector(`.sidebar-shelf-item[data-id="${shelfId}"]`)
+      ?.classList.add('sidebar-item-active');
+  }
+}
+
+export function updateNavCounts(allCount, readingCount) {
+  const allEl     = document.getElementById('nav-all-count');
+  const readingEl = document.getElementById('nav-reading-count');
+  if (allEl) allEl.textContent = allCount > 0 ? allCount : '';
+  _readingCount = readingCount;
+  if (readingEl) readingEl.textContent = readingCount > 0 ? readingCount : '';
+  applyCurrentlyReadingVisibility();
+}
+
+export function updateDownloadedCount(n) {
+  _downloadedCount = n;
+  const el      = document.getElementById('nav-downloaded');
+  const countEl = document.getElementById('nav-downloaded-count');
+  if (el)      el.style.display = n > 0 ? '' : 'none';
+  if (countEl) countEl.textContent = n > 0 ? String(n) : '';
+}
+
+export function setBookorbitNavVisible(visible) {
+  _bookorbitVisible = !!visible;
+  const el = document.getElementById('nav-bookorbit');
+  if (el) el.style.display = _bookorbitVisible ? '' : 'none';
+}
+
+export function setOpdsNavVisible(visible) {
+  _opdsVisible = !!visible;
+  const el = document.getElementById('nav-opds');
+  if (el) el.style.display = _opdsVisible ? '' : 'none';
+}
+
+// Keeps the "Online library" nav item in sync when servers are added/edited/removed in Settings
+// (see settings.js's notifyOpdsServersChanged) without requiring a full page reload.
+document.addEventListener('opdsserverschanged', () => {
+  apiFetch('/opds/servers').then(servers => {
+    setOpdsNavVisible(servers.length > 0);
+  }).catch(() => {});
+});
+
+// Small warning badge on the BookOrbit nav item when it's enabled but unreachable —
+// survives sidebar re-renders (langchange) since _bookorbitWarning is module state.
+export function setBookorbitWarning(show) {
+  _bookorbitWarning = !!show;
+  document.getElementById('nav-bookorbit-warning')?.classList.toggle('hidden', !_bookorbitWarning);
+}
+
+// One active reachability check per app load (fire-and-forget — never blocks the library).
+function checkBookorbitHealth() {
+  apiFetch('/bookorbit/health')
+    .then(h => setBookorbitWarning(h.enabled && h.reachable === false))
+    .catch(() => {}); // non-critical — leave the warning state as-is
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+function navigate(shelfId) {
+  showPanel('library');
+  _onShelfSelect?.(shelfId);
+  setActive(shelfId);
+  closeSidebar();
+}
+
+function initSidebarLangPicker(container) {
+  initIconLangPicker(container);
+}
+
+function buildSidebarHtml() {
+  return `
+    <div class="sidebar-header">
+      <a href="/" class="logo"><img src="/images/codexa.svg" class="nav-icon nav-icon-codexa" alt="Codexa"> Codexa<img src="/images/offline.svg" class="nav-icon nav-icon-offline offline-icon" alt="" aria-hidden="true"></a>
+      <button id="sidebar-collapse-btn" class="sidebar-collapse-btn" title="${t('sidebar.collapse')}" aria-label="${t('sidebar.collapse')}">‹</button>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="/" class="sidebar-item" id="nav-currently-reading">
+        <span class="sidebar-item-icon"><img src="/images/currently_reading.svg" class="nav-icon nav-icon-currently-reading" alt=""></span>
+        <span class="sidebar-item-label">${t('sidebar.currently_reading')}</span>
+        <span class="shelf-count" id="nav-reading-count"></span>
+      </a>
+      <a href="/" class="sidebar-item" id="nav-downloaded" style="${_downloadedCount > 0 ? '' : 'display:none'}">
+        <span class="sidebar-item-icon"><img src="/images/download.svg" class="nav-icon nav-icon-download" alt=""></span>
+        <span class="sidebar-item-label">${t('sidebar.downloaded')}</span>
+        <span class="shelf-count" id="nav-downloaded-count">${_downloadedCount > 0 ? _downloadedCount : ''}</span>
+      </a>
+      <a href="/" class="sidebar-item" id="nav-all-books">
+        <span class="sidebar-item-icon"><img src="/images/all_library.svg" class="nav-icon nav-icon-all-library" alt=""></span>
+        <span class="sidebar-item-label">${t('sidebar.all_library')}</span>
+        <span class="shelf-count" id="nav-all-count"></span>
+      </a>
+      <div class="sidebar-section">
+        <div class="sidebar-section-header">
+          <span class="sidebar-section-title">${t('sidebar.shelves')}</span>
+          <div class="sidebar-section-btns">
+            <button id="shelf-edit-btn" class="sidebar-add-btn${_shelfEditMode ? ' active' : ''}" title="${t('sidebar.edit_shelves')}">✎</button>
+            <button id="add-shelf-btn" class="sidebar-add-btn" title="${t('sidebar.add_shelf')}">+</button>
+          </div>
+        </div>
+        <div id="shelves-list"></div>
+      </div>
+      <div class="sidebar-divider"></div>
+      <a href="/?panel=bookorbit" class="sidebar-item" id="nav-bookorbit" style="${_bookorbitVisible ? '' : 'display:none'}">
+        <span class="sidebar-item-icon"><img src="/images/bookorbit.svg" class="nav-icon nav-icon-bookorbit" alt=""></span>
+        <span class="sidebar-item-label">${t('sidebar.bookorbit')}</span>
+        <span class="sidebar-item-warning hidden" id="nav-bookorbit-warning" title="${t('sidebar.bookorbit_unreachable')}">⚠</span>
+      </a>
+      <a href="/?panel=opds" class="sidebar-item" id="nav-opds" style="${_opdsVisible ? '' : 'display:none'}">
+        <span class="sidebar-item-icon"><img src="/images/online_library.svg" class="nav-icon nav-icon-online-library" alt=""></span>
+        <span class="sidebar-item-label">${t('sidebar.online_library')}</span>
+      </a>
+      <a href="/?panel=settings" class="sidebar-item" id="nav-settings">
+        <span class="sidebar-item-icon"><img src="/images/settings.svg" class="nav-icon nav-icon-settings" alt=""></span>
+        <span class="sidebar-item-label">${t('sidebar.settings')}</span>
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-username-row">
+        <div class="sidebar-username" id="sidebar-username"></div>
+        <button class="sidebar-stats-btn" id="sidebar-stats-btn" title="${t('stats.open')}">
+          <img src="/images/statistics.svg" class="nav-icon nav-icon-statistics" alt="">
+        </button>
+      </div>
+      <div id="sidebar-theme-picker" class="sidebar-lang-picker"></div>
+      <div id="sidebar-size-picker" class="sidebar-lang-picker"></div>
+      <div id="sidebar-lang-picker" class="sidebar-lang-picker"></div>
+      <div class="sidebar-footer-row">
+        <button class="sidebar-item sidebar-item-btn" id="sidebar-logout-btn">
+          <span class="sidebar-item-icon"><img src="/images/logout.svg" class="nav-icon nav-icon-logout" alt=""></span>
+          <span class="sidebar-item-label">${t('sidebar.logout')}</span>
+        </button>
+        <a class="sidebar-github-link" href="https://github.com/thehijacker/codexa" target="_blank" rel="noopener noreferrer" title="${t('sidebar.github')}" aria-label="${t('sidebar.github')}">
+          <img src="/images/github.svg" class="nav-icon nav-icon-github" alt="GitHub">
+        </a>
+      </div>
+    </div>`;
+}
+
+let _dragSrcId = null; // shelf id being dragged
+
+function _attachShelfEditBtn() {
+  document.getElementById('shelf-edit-btn')?.addEventListener('click', () => {
+    _shelfEditMode = !_shelfEditMode;
+    document.getElementById('shelf-edit-btn')?.classList.toggle('active', _shelfEditMode);
+    const list = document.getElementById('shelves-list');
+    list?.classList.toggle('shelves-edit-mode', _shelfEditMode);
+    // Update draggable on existing items without a full re-render
+    list?.querySelectorAll('.sidebar-shelf-item').forEach(el => {
+      el.draggable = _shelfEditMode;
+    });
+  });
+}
+
+function renderShelves() {
+  const list = document.getElementById('shelves-list');
+  if (!list) return;
+  list.innerHTML = '';
+  list.classList.toggle('shelves-edit-mode', _shelfEditMode);
+  shelves.forEach(shelf => {
+    const item = document.createElement('div');
+    item.className = 'sidebar-shelf-item' + (_activeShelfId === shelf.id ? ' sidebar-item-active' : '');
+    item.dataset.id = shelf.id;
+    item.draggable  = _shelfEditMode;
+    // Same "linked" icon for a shelf synced from an OPDS folder or a BookOrbit collection/smart
+    // scope — both are just "this shelf tracks an external source" to the user.
+    const isLinked = !!(shelf.opds_folder_url || shelf.bo_collection_id || shelf.bo_smart_scope_id);
+    const shelfIcon = isLinked ? 'opds_shelf' : 'shelf';
+    const shelfIconClass = isLinked ? 'nav-icon nav-icon-shelf nav-icon-opds-shelf' : 'nav-icon nav-icon-shelf';
+    item.innerHTML = `
+      <span class="shelf-drag-handle" title="${t('sidebar.drag_to_reorder')}" aria-hidden="true">⠿</span>
+      <span class="sidebar-item-icon"><img src="/images/${shelfIcon}.svg" class="${shelfIconClass}" alt=""></span>
+      <span class="sidebar-item-label">${escHtml(shelf.name)}</span>
+      <span class="shelf-new-badge hidden" id="shelf-badge-${shelf.id}"></span>
+      <span class="shelf-count">${shelf.book_count}</span>
+      <button class="shelf-edit-btn" title="Uredi" data-id="${shelf.id}">✎</button>`;
+
+    item.addEventListener('click', e => {
+      if (e.target.closest('.shelf-edit-btn')) return;
+      if (!navigator.onLine) return;
+      navigate(shelf.id);
+    });
+    item.querySelector('.shelf-edit-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      if (!navigator.onLine) return;
+      document.dispatchEvent(new CustomEvent('sidebar:editshelf', { detail: shelf }));
+    });
+
+    // Drag-to-reorder
+    item.addEventListener('dragstart', e => {
+      _dragSrcId = shelf.id;
+      item.classList.add('drag-active');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(shelf.id));
+    });
+    item.addEventListener('dragend', () => {
+      _dragSrcId = null;
+      document.querySelectorAll('.sidebar-shelf-item').forEach(el => {
+        el.classList.remove('drag-active', 'drag-over');
+      });
+    });
+    item.addEventListener('dragover', e => {
+      if (_dragSrcId === null || _dragSrcId === shelf.id) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.sidebar-shelf-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+      item.classList.add('drag-over');
+    });
+    item.addEventListener('dragleave', e => {
+      if (!item.contains(e.relatedTarget)) item.classList.remove('drag-over');
+    });
+    item.addEventListener('drop', e => {
+      e.preventDefault();
+      if (_dragSrcId === null || _dragSrcId === shelf.id) return;
+      item.classList.remove('drag-over');
+      const srcIdx  = shelves.findIndex(s => s.id === _dragSrcId);
+      const destIdx = shelves.findIndex(s => s.id === shelf.id);
+      if (srcIdx === -1 || destIdx === -1) return;
+      // Optimistic reorder
+      const [moved] = shelves.splice(srcIdx, 1);
+      shelves.splice(destIdx, 0, moved);
+      renderShelves();
+      // Persist to server
+      const order = shelves.map(s => s.id);
+      apiFetch('/shelves/reorder', { method: 'PUT', body: JSON.stringify({ order }) })
+        .catch(() => reloadShelves()); // revert on failure
+    });
+
+    list.appendChild(item);
+  });
+  // Reapply badge counts that survived the re-render
+  for (const [id, count] of _shelfBadges) _applyShelfBadge(id, count);
+}
+
+function _applyShelfBadge(shelfId, count) {
+  const el = document.getElementById(`shelf-badge-${shelfId}`);
+  if (!el) return;
+  if (count > 0) { el.textContent = String(count); el.classList.remove('hidden'); }
+  else           { el.classList.add('hidden'); }
+}
+
+export function setShelfBadge(shelfId, count) {
+  if (count > 0) _shelfBadges.set(shelfId, count);
+  else           _shelfBadges.delete(shelfId);
+  _applyShelfBadge(shelfId, count);
+}
+
+// Re-render sidebar when language changes
+document.addEventListener('langchange', () => {
+  const sidebar = document.getElementById('app-sidebar');
+  if (!sidebar) return;
+  // Preserve username that was already set
+  const username = sidebar.querySelector('#sidebar-username')?.textContent || '';
+  sidebar.innerHTML = buildSidebarHtml();
+  initLibraryThemeControls(sidebar);
+  initDisplaySizeControls(sidebar);
+  initSidebarLangPicker(sidebar.querySelector('#sidebar-lang-picker'));
+  const unameEl = sidebar.querySelector('#sidebar-username');
+  if (unameEl) unameEl.textContent = username;
+  setBookorbitWarning(_bookorbitWarning);
+  // Restore active panel
+  if (_activePage === 'settings') {
+    sidebar.querySelector('#nav-settings')?.classList.add('sidebar-item-active');
+  } else if (_activePage === 'opds') {
+    sidebar.querySelector('#nav-opds')?.classList.add('sidebar-item-active');
+  } else {
+    setActive(_activeShelfId);
+  }
+  renderShelves();
+  applyCurrentlyReadingVisibility();
+  if (_activePage !== 'library') loadNavCounts();
+  // Re-attach event listeners (sidebar HTML was replaced)
+  const collapseBtn = sidebar.querySelector('#sidebar-collapse-btn');
+  // Restore collapse state — sidebar.classList is preserved but button text was reset by innerHTML rebuild
+  const wasCollapsed = localStorage.getItem('sidebarCollapsed') === '1';
+  sidebar.classList.toggle('collapsed', wasCollapsed);
+  if (collapseBtn) {
+    collapseBtn.textContent = wasCollapsed ? '›' : '‹';
+    collapseBtn.title = wasCollapsed ? t('sidebar.expand') : t('sidebar.collapse');
+  }
+  collapseBtn?.addEventListener('click', () => {
+    if (window.matchMedia('(max-width: 768px)').matches) { closeSidebar(); return; }
+    const btn = sidebar.querySelector('#sidebar-collapse-btn');
+    const collapsed = sidebar.classList.toggle('collapsed');
+    btn.textContent = collapsed ? '›' : '‹';
+    btn.title = collapsed ? t('sidebar.expand') : t('sidebar.collapse');
+    localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+  });
+  sidebar.querySelector('#sidebar-logout-btn')?.addEventListener('click', () => {
+    if (!navigator.onLine) {
+      confirmDialog(t('sidebar.logout_offline_warning'), () => { clearToken(); window.location.href = '/login.html'; }, t('sidebar.logout'), false);
+      return;
+    }
+    clearToken(); window.location.href = '/login.html';
+  });
+  sidebar.querySelector('#nav-currently-reading')?.addEventListener('click', e => {
+    e.preventDefault(); navigate('reading');
+  });
+  sidebar.querySelector('#nav-downloaded')?.addEventListener('click', e => {
+    e.preventDefault(); navigate('downloaded');
+  });
+  sidebar.querySelector('#nav-all-books')?.addEventListener('click', e => {
+    e.preventDefault(); navigate('all');
+  });
+  sidebar.querySelector('#add-shelf-btn')?.addEventListener('click', () => {
+    if (!navigator.onLine) return;
+    document.dispatchEvent(new CustomEvent('sidebar:addshelf'));
+  });
+  _attachShelfEditBtn();
+  sidebar.querySelector('#nav-settings')?.addEventListener('click', e => {
+    e.preventDefault();
+    if (!navigator.onLine) return;
+    showPanel('settings'); closeSidebar();
+  });
+  sidebar.querySelector('#nav-opds')?.addEventListener('click', e => {
+    e.preventDefault();
+    if (!navigator.onLine) return;
+    showPanel('opds'); closeSidebar();
+  });
+  sidebar.querySelector('#nav-bookorbit')?.addEventListener('click', e => {
+    e.preventDefault();
+    if (!navigator.onLine) return;
+    showPanel('bookorbit'); closeSidebar();
+  });
+  sidebar.querySelector('#sidebar-stats-btn')?.addEventListener('click', () => {
+    if (!navigator.onLine) return;
+    document.dispatchEvent(new CustomEvent('sidebar:stats'));
+  });
+});
+
+export function openSidebar() {
+  document.getElementById('app-sidebar')?.classList.add('open');
+  document.getElementById('sidebar-overlay')?.classList.add('visible');
+  document.body.style.overflow = 'hidden';
+}
+
+export function closeSidebar() {
+  document.getElementById('app-sidebar')?.classList.remove('open');
+  document.getElementById('sidebar-overlay')?.classList.remove('visible');
+  document.body.style.overflow = '';
+}
+
+function getLibraryTheme() {
+  const saved = localStorage.getItem(LIB_THEME_KEY) || 'system';
+  return LIB_THEMES.has(saved) ? saved : 'system';
+}
+
+function setLibraryTheme(theme) {
+  const mode = LIB_THEMES.has(theme) ? theme : 'system';
+  localStorage.setItem(LIB_THEME_KEY, mode);
+  applyLibraryTheme(mode);
+}
+
+function applyLibraryTheme(theme) {
+  const html = document.documentElement;
+  const body = document.body;
+  if (!body || !body.classList.contains('sidebar-layout')) return;
+  let resolved = theme;
+  if (theme === 'system' && typeof window.AndroidCodexa?.isNightMode === 'function') {
+    resolved = window.AndroidCodexa.isNightMode() ? 'night' : 'day';
+  }
+  if (resolved === 'system') {
+    body.removeAttribute('data-lib-theme');
+    html.removeAttribute('data-lib-theme');
+  } else {
+    body.setAttribute('data-lib-theme', resolved);
+    html.setAttribute('data-lib-theme', resolved);
+  }
+}
+
+// Generic dropdown styled exactly like the language picker (reuses .lang-menu-* CSS):
+// a button showing { icon, current label, caret } that opens a list of options upward.
+// opts: { container, iconSrc, iconClass, ariaLabel, options:[{value,label}], getValue, onSelect }
+function buildIconDropdown(opts) {
+  const { container, iconSrc, iconClass, ariaLabel, options, getValue, onSelect } = opts;
+  if (!container) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'lang-menu-wrap';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'lang-menu-btn';
+  btn.setAttribute('aria-haspopup', 'listbox');
+  btn.setAttribute('aria-expanded', 'false');
+  if (ariaLabel) btn.setAttribute('aria-label', ariaLabel);
+  btn.innerHTML = `<img src="${iconSrc}" class="nav-icon ${iconClass}" alt="">`
+    + '<span class="lang-menu-label"></span><span class="lang-menu-caret">▾</span>';
+  const labelEl = btn.querySelector('.lang-menu-label');
+
+  const list = document.createElement('div');
+  list.className = 'lang-menu-list lang-menu-up hidden';
+  list.setAttribute('role', 'listbox');
+
+  function render() {
+    const cur = getValue();
+    const sel = options.find(o => o.value === cur) || options[0];
+    labelEl.textContent = sel ? sel.label : '';
+    list.innerHTML = '';
+    for (const opt of options) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'lang-menu-option' + (opt.value === cur ? ' active' : '');
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', opt.value === cur ? 'true' : 'false');
+      item.innerHTML = `<span>${escHtml(opt.label)}</span><span class="lang-menu-check">✓</span>`;
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeList();
+        onSelect(opt.value);
+        render();
+      });
+      list.appendChild(item);
+    }
+  }
+  function openList() {
+    render();
+    // Collapsed sidebar: escape the narrow column / overflow with position:fixed.
+    if (container.closest('.app-sidebar')?.classList.contains('collapsed')) {
+      const rect = btn.getBoundingClientRect();
+      list.style.cssText = `position:fixed;left:${rect.right + 8}px;bottom:${window.innerHeight - rect.top + 4}px;top:auto;right:auto;`;
+    } else {
+      list.style.cssText = '';
+    }
+    list.classList.remove('hidden');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+  function closeList() {
+    list.classList.add('hidden');
+    btn.setAttribute('aria-expanded', 'false');
+  }
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    list.classList.contains('hidden') ? openList() : closeList();
+  });
+  document.addEventListener('click', closeList);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeList(); });
+
+  wrap.appendChild(btn);
+  wrap.appendChild(list);
+  container.innerHTML = '';
+  container.appendChild(wrap);
+  render();
+}
+
+// ── Display size (viewport-width scaling for large-screen e-readers/tablets) ───
+const DISPLAY_SIZE_KEY = 'br_display_size';
+const DISPLAY_SIZES = ['auto', 'large', 'larger', 'largest'];
+
+function getDisplaySize() {
+  const v = localStorage.getItem(DISPLAY_SIZE_KEY) || 'auto';
+  return DISPLAY_SIZES.includes(v) ? v : 'auto';
+}
+
+function initDisplaySizeControls(sidebar) {
+  buildIconDropdown({
+    container: sidebar.querySelector('#sidebar-size-picker'),
+    iconSrc:   '/images/display_size.svg',
+    iconClass: 'nav-icon-display-size',
+    ariaLabel: t('sidebar.display_size'),
+    options: [
+      { value: 'auto',    label: t('sidebar.size_auto') },
+      { value: 'large',   label: t('sidebar.size_large') },
+      { value: 'larger',  label: t('sidebar.size_larger') },
+      { value: 'largest', label: t('sidebar.size_largest') },
+    ],
+    getValue: getDisplaySize,
+    onSelect: (v) => {
+      if (v === getDisplaySize()) return;
+      try { localStorage.setItem(DISPLAY_SIZE_KEY, v); } catch (_) { /* ignore */ }
+      // Apply live (no reload). The shared fn (index.html head) uses a viewport-width
+      // override on mobile and CSS zoom on desktop, detecting which the browser needs.
+      if (typeof window.__brApplyDisplaySize === 'function') window.__brApplyDisplaySize(v, true);
+    },
+  });
+}
+
+function initLibraryThemeControls(sidebar) {
+  const androidEink = typeof window.AndroidCodexa?.isEinkMode === 'function'
+    && window.AndroidCodexa.isEinkMode();
+  if (androidEink) localStorage.setItem(LIB_THEME_KEY, 'eink');
+  applyLibraryTheme(androidEink ? 'eink' : getLibraryTheme());
+  buildIconDropdown({
+    container: sidebar.querySelector('#sidebar-theme-picker'),
+    iconSrc:   '/images/appearance.svg',
+    iconClass: 'nav-icon-appearance',
+    ariaLabel: t('sidebar.appearance'),
+    options: [
+      { value: 'day',    label: t('sidebar.theme_day') },
+      { value: 'night',  label: t('sidebar.theme_night') },
+      { value: 'system', label: t('sidebar.theme_system') },
+      { value: 'eink',   label: t('sidebar.theme_eink') },
+    ],
+    getValue: getLibraryTheme,
+    onSelect: (v) => setLibraryTheme(v), // setLibraryTheme persists + applies
+  });
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
