@@ -89,6 +89,7 @@ export default defineConfig({
       injectRegister: 'auto',
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp}'],
+        navigateFallbackDenylist: [/^\/reader\.html/],
         // S'assurer que le service worker met en cache les couvertures de livres chargées en externe (CORS)
         runtimeCaching: [
           {

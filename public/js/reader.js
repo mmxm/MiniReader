@@ -6744,11 +6744,18 @@ document.addEventListener('fullscreenchange', async () => {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
+  log('[reader] init() démarré. Vérification de window.parent...');
+  if (window !== window.parent) {
+    log('[reader] Chargé dans une iframe. _bookMetadata:', !!window.parent._bookMetadata, '_epubArrayBuffer:', !!window.parent._epubArrayBuffer);
+  } else {
+    log('[reader] Chargé en mode autonome (hors iframe).');
+  }
   if (window !== window.parent && (!window.parent._bookMetadata || !window.parent._epubArrayBuffer)) {
     log('[reader] Waiting for window.parent to supply book data...');
     setTimeout(init, 50);
     return;
   }
+  log('[reader] Initialisation de la liseuse en cours. Attente de la langue (i18n)...');
   await _i18nReady;
 
   // If localStorage was cleared (no saved prefs), restore dict selection/order from the
