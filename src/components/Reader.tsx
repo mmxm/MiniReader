@@ -241,7 +241,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
   };
 
   return (
-    <div style={{ width: '100vw', height: '100vh', position: 'fixed', inset: 0, backgroundColor: '#000', zIndex: 1000 }}>
+    <div style={{ width: '100dvw', height: '100dvh', position: 'fixed', inset: 0, backgroundColor: '#000', zIndex: 1000, overflow: 'hidden' }}>
       {isLoading ? (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#fff', gap: '16px', fontFamily: 'system-ui' }}>
           <div style={{ border: '4px solid rgba(255,255,255,0.1)', borderLeftColor: '#fff', borderRadius: '50%', width: '40px', height: '40px', animation: 'spin 1s linear infinite' }}></div>
@@ -256,7 +256,7 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
       ) : (
         <iframe
           src={`/reader.html?id=${bookId}`}
-          style={{ border: 'none', width: '100%', height: '100%' }}
+          style={{ border: 'none', width: '100%', height: '100%', display: 'block' }}
           title="Lecteur d'ebook Codexa"
           onLoad={() => console.log("[Reader PWA] [Parent] onLoad natif de l'IFrame déclenché !")}
         />
