@@ -31,7 +31,8 @@ if (!Promise.allSettled) {
   ));
 }
 
-if (!requireAuth()) throw new Error('not authenticated');
+const isPwaMode = window !== window.parent && window.parent._bookMetadata;
+if (!isPwaMode && !requireAuth()) throw new Error('not authenticated');
 const params = new URLSearchParams(window.location.search);
 const isPeekMode = params.get('peek') === '1';
 const bookId = params.get('id');
