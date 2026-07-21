@@ -140,6 +140,17 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
         await db.readingStates.clear();
         await db.syncQueue.clear();
         
+        // Vider aussi le Cache API du navigateur (Service Worker caches)
+        if ('caches' in window) {
+          try {
+            const cacheKeys = await caches.keys();
+            await Promise.all(cacheKeys.map(key => caches.delete(key)));
+            console.log('[Reset] Caches du Service Worker vidés.');
+          } catch (cacheErr) {
+            console.error('[Reset] Échec du vidage des caches :', cacheErr);
+          }
+        }
+        
         localStorage.removeItem('bookorbit_sync_token');
         localStorage.removeItem('bookorbit_last_sync_date');
         

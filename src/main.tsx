@@ -31,6 +31,14 @@ if (typeof window !== 'undefined') {
   };
 
   (window as any).__logHistory = logHistory;
+
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'iframe-log') {
+      const levelStr = String(e.data.level || 'log').toUpperCase();
+      logHistory.push(`[${new Date().toLocaleTimeString()}] [${levelStr}] [IFrame] ${e.data.message}`);
+      if (logHistory.length > 150) logHistory.shift();
+    }
+  });
 }
 
 import { registerSW } from 'virtual:pwa-register'

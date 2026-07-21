@@ -3,6 +3,29 @@
 <head>
   <meta charset="UTF-8" />
   <script>
+    // Transmettre les logs de l'iframe au parent pour le diagnostic
+    if (window !== window.parent) {
+      ['log', 'warn', 'error', 'info'].forEach(method => {
+        const original = console[method];
+        if (original) {
+          console[method] = function(...args) {
+            original.apply(console, args);
+            window.parent.postMessage({
+              type: 'iframe-log',
+              level: method,
+              message: args.map(a => {
+                try {
+                  return typeof a === 'object' ? JSON.stringify(a) : String(a);
+                } catch {
+                  return String(a);
+                }
+              }).join(' ')
+            }, '*');
+          };
+        }
+      });
+    }
+
     // Intercepter et simuler les appels API Codexa en mode PWA pour éviter la saturation réseau
     if (window !== window.parent) {
       const originalFetch = window.fetch;
