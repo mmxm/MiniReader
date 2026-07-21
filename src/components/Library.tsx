@@ -37,6 +37,12 @@ export const Library: React.FC<LibraryProps> = ({
   useEffect(() => {
     loadLibrary();
     setLastSyncDate(localStorage.getItem('bookorbit_last_sync_date'));
+    
+    if (localStorage.getItem('force_sync_on_load') === 'true') {
+      localStorage.removeItem('force_sync_on_load');
+      console.log('[Library] Détection du drapeau force_sync_on_load. Lancement de la synchronisation automatique...');
+      handleSyncCatalog();
+    }
   }, [syncTrigger]);
 
   const loadLibrary = async () => {

@@ -131,6 +131,39 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
     }
   };
 
+  const handleCompleteResetAndSync = async () => {
+    if (window.confirm('ATTENTION: Cela va supprimer tous vos livres téléchargés localement, vider votre progression locale et forcer une synchronisation complète depuis zéro. Votre URL BookOrbit sera conservée. Voulez-vous continuer ?')) {
+      try {
+        setStatus('testing');
+        await db.books.clear();
+        await db.bookFiles.clear();
+        await db.readingStates.clear();
+        await db.syncQueue.clear();
+        
+        localStorage.removeItem('bookorbit_sync_token');
+        localStorage.removeItem('bookorbit_last_sync_date');
+        
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (key && (key.startsWith('br_progress_') || key.startsWith('br_cx_page_'))) {
+            localStorage.removeItem(key);
+          }
+        }
+        
+        localStorage.setItem('force_sync_on_load', 'true');
+        loadStorageStats();
+        setStatus('success');
+        
+        alert('Réinitialisation terminée. Redirection vers la bibliothèque pour lancer la synchronisation...');
+        onConfigSaved();
+      } catch (err) {
+        console.error(err);
+        setStatus('error');
+        alert('Erreur lors de la réinitialisation.');
+      }
+    }
+  };
+
   const handleForceFullSync = () => {
     if (window.confirm('Voulez-vous réinitialiser le jeton de synchronisation locale ? La prochaine synchronisation retéléchargera tout le catalogue à partir de zéro.')) {
       localStorage.removeItem('bookorbit_sync_token');
@@ -251,7 +284,7 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
           </div>
         </div>
 
-        <div className="stats-actions">
+        <div className="stats-actions" style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '16px' }}>
           <button 
             type="button" 
             className="btn btn-danger" 
@@ -261,9 +294,16 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
           </button>
           <button 
             type="button" 
+            className="btn btn-warning" 
+            onClick={handleCompleteResetAndSync}
+          >
+            Réinitialiser &amp; Tout Synchroniser
+          </button>
+          <button 
+            type="button" 
             className="btn btn-secondary" 
             onClick={handleForceFullSync}
-            style={{ marginLeft: '12px' }}
+            style={{ background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-color)' }}
           >
             Forcer une synchronisation complète
           </button>
