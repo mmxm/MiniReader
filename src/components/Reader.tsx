@@ -185,7 +185,11 @@ export const Reader: React.FC<ReaderProps> = ({ bookId, onClose }) => {
 
     // Sauvegarde en cas de mise en veille / flou de fenêtre
     const handleVisibilityOrBlur = () => {
-      console.log('[Reader PWA] Perte de focus ou mise en veille de l\'application (sauvegarde et synchronisation intermédiaire)');
+      if (document.activeElement && document.activeElement.tagName === 'IFRAME') {
+        console.log("[Reader PWA] Ignoré blur car le focus est sur l'iframe de lecture.");
+        return;
+      }
+      console.log("[Reader PWA] Perte de focus ou mise en veille de l'application (sauvegarde et synchronisation intermédiaire)");
       saveProgressState(true);
     };
     window.addEventListener('visibilitychange', handleVisibilityOrBlur);
