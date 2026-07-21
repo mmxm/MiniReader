@@ -121,7 +121,7 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
     if (window.confirm('Voulez-vous supprimer tous les livres téléchargés localement ? Les métadonnées et votre avancement seront conservés.')) {
       try {
         await db.bookFiles.clear();
-        await db.books.where('downloaded').equals(1).modify({ downloaded: false });
+        await db.books.toCollection().modify({ downloaded: false });
         loadStorageStats();
         alert('Cache vidé avec succès.');
       } catch (err) {
