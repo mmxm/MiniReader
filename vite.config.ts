@@ -90,6 +90,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp}'],
         navigateFallbackDenylist: [/^\/reader\.html/],
+        ignoreURLParametersMatching: [/.*/],
         // S'assurer que le service worker met en cache les couvertures de livres chargées en externe (CORS)
         runtimeCaching: [
           {
