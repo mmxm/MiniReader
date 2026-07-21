@@ -256,7 +256,6 @@ export const Settings: React.FC<SettingsProps> = ({ onConfigSaved, appTheme, onT
             type="button" 
             className="btn btn-danger" 
             onClick={handleClearCache}
-            disabled={stats.downloadedCount === 0}
           >
             Vider le cache hors ligne
           </button>
